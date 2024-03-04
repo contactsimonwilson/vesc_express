@@ -60,6 +60,8 @@ set(COMPONENT_SRCS
 "ble/custom_ble.c"
 "ble/lispif_ble_extensions.c"
 
+"pubremote/pubremote.c"
+
 "display/lispif_disp_extensions.c"
 "display/disp_sh8501b.c"
 "display/disp_ili9341.c"

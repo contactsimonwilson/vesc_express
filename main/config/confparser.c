@@ -37,6 +37,7 @@ int32_t confparser_serialize_main_config_t(uint8_t *buffer, const main_config_t 
 	buffer_append_uint32(buffer, conf->ble_pin, &ind);
 	buffer_append_uint32(buffer, conf->ble_service_capacity, &ind);
 	buffer_append_uint32(buffer, conf->ble_chr_descr_capacity, &ind);
+	buffer[ind++] = conf->pubremote_mode;
 
 	return ind;
 }
@@ -76,7 +77,7 @@ bool confparser_deserialize_main_config_t(const uint8_t *buffer, main_config_t *
 	conf->ble_pin = buffer_get_uint32(buffer, &ind);
 	conf->ble_service_capacity = buffer_get_uint32(buffer, &ind);
 	conf->ble_chr_descr_capacity = buffer_get_uint32(buffer, &ind);
-
+	conf->pubremote_mode = buffer_get_uint32(buffer, &ind);
 	return true;
 }
 
@@ -100,5 +101,6 @@ void confparser_set_defaults_main_config_t(main_config_t *conf) {
 	conf->ble_pin = CONF_BLE_PIN;
 	conf->ble_service_capacity = CONF_BLE_SERVICE_CAPACITY;
 	conf->ble_chr_descr_capacity = CONF_BLE_CHR_DESCR_CAPACITY;
+	conf->pubremote_mode = CONF_PUBREMOTE_MODE;
 }
 

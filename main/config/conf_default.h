@@ -88,6 +88,11 @@
 #define CONF_BLE_PIN 123456
 #endif
 
+// Pubremote Mode
+#ifndef CONF_PUBREMOTE_MODE
+#define CONF_PUBREMOTE_MODE 0
+#endif
+
 // BLE Service Capacity
 #ifndef CONF_BLE_SERVICE_CAPACITY
 #define CONF_BLE_SERVICE_CAPACITY 0

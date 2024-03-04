@@ -142,6 +142,7 @@ typedef struct {
 	lbm_uint ble_mode;
 	lbm_uint ble_name;
 	lbm_uint ble_pin;
+	lbm_uint pubremote_mode;
 
 	// Arrays
 	lbm_uint copy;
@@ -289,6 +290,8 @@ static bool compare_symbol(lbm_uint sym, lbm_uint *comp) {
 			get_add_symbol("ble-name", comp);
 		} else if (comp == &syms_vesc.ble_pin) {
 			get_add_symbol("ble-pin", comp);
+		} else if (comp == &syms_vesc.pubremote_mode) {
+			get_add_symbol("pubremote-mode", comp);
 		}
 
 		else if (comp == &syms_vesc.copy) {
@@ -641,6 +644,10 @@ static lbm_value ext_conf_setget(bool set, lbm_value *args, lbm_uint argn) {
 		res = get_or_set_string(set, conf->ble_name, &set_arg, sizeof(conf->ble_name));
 	} else if (compare_symbol(name, &syms_vesc.ble_pin)) {
 		res = get_or_set_u32(set, &conf->ble_pin, &set_arg);
+	} else if (compare_symbol(name, &syms_vesc.pubremote_mode)) {
+		int v = conf->pubremote_mode;
+		res = get_or_set_i(set, &v, &set_arg);
+		conf->pubremote_mode = v;
 	}
 
 	return res;

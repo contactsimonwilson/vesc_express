@@ -23,6 +23,7 @@
 #include "comm_can.h"
 #include "comm_ble.h"
 #include "ble/custom_ble.h"
+#include "pubremote/pubremote.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>

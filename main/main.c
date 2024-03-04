@@ -47,6 +47,8 @@
 #include "bms.h"
 #include "ble/custom_ble.h"
 
+#include "pubremote/pubremote.h"
+
 #include <string.h>
 #include <sys/time.h>
 
@@ -139,6 +141,11 @@ void app_main(void) {
 
 	if (backup.config.wifi_mode != WIFI_MODE_DISABLED) {
 		comm_wifi_init();
+	}
+
+	if(backup.config.pubremote_mode != PUBREMOTE_MODE_DISABLED)
+	{
+		pubremote_init();
 	}
 
 	nmea_init();

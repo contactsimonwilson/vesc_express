@@ -45,6 +45,7 @@ typedef struct {
 	uint32_t ble_pin;
 	uint32_t ble_service_capacity;
 	uint32_t ble_chr_descr_capacity;
+	PUBREMOTE_MODE pubremote_mode;
 } main_config_t;
 #endif
 

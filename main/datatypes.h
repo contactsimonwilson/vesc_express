@@ -85,6 +85,10 @@ typedef enum {
 } WIFI_MODE;
 
 typedef enum {
+	PUBREMOTE_MODE_DISABLED = 0,
+} PUBREMOTE_MODE;
+
+typedef enum {
 	BLE_MODE_DISABLED = 0,
 	BLE_MODE_OPEN,
 	BLE_MODE_ENCRYPTED,
