@@ -825,6 +825,7 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 	} break;
 
 	case COMM_CUSTOM_APP_DATA:
+		commands_printf("custom");
 		lispif_process_custom_app_data(data, len);
 		break;
 
