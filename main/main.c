@@ -123,6 +123,7 @@ void app_main(void) {
 #ifdef HW_EARLY_LBM_INIT
 	HW_INIT_HOOK();
 	lispif_init();
+	HW_POST_LISPIF_HOOK();
 #endif
 
 	mempools_init();
@@ -163,6 +164,7 @@ void app_main(void) {
 #ifndef HW_EARLY_LBM_INIT
 	HW_INIT_HOOK();
 	lispif_init();
+	HW_POST_LISPIF_HOOK();
 #endif
 
 #ifndef HW_NO_UART
@@ -187,9 +189,8 @@ void app_main(void) {
 
 	init_done = true;
 
-	for (;;) {
-		vTaskDelay(5000 / portTICK_PERIOD_MS);
-	}
+	// Exit main to free up heap-space
+	vTaskDelete(NULL);
 }
 
 uint32_t main_calc_hw_crc(void) {
