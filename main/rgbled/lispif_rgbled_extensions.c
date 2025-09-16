@@ -16,6 +16,9 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
     */
+#include <stdint.h>   // for uint8_t, uint32_t, etc.
+#include <stdbool.h>  // for bool, true, false
+#include <stddef.h>   // for size_t
 
 #include "lispif_rgbled_extensions.h"
 #include "lispif.h"
@@ -194,6 +197,10 @@ static void rgbled_deinit_internal(int mode) {
 	}
 }
 
+void rgbled_deinit(void) {
+	rgbled_deinit_internal(0);
+}
+
 static lbm_value ext_rgbled_deinit(lbm_value *args, lbm_uint argn) {
 	int mode = 0;
 	if (argn >= 1 && lbm_is_number(args[0])) {
@@ -205,29 +212,11 @@ static lbm_value ext_rgbled_deinit(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
-static lbm_value ext_rgbled_init(lbm_value *args, lbm_uint argn) {
-	LBM_CHECK_NUMBER_ALL();
-
-	if (argn < 1 || argn > 2) {
-		lbm_set_error_reason((char*)lbm_error_str_num_args);
-		return ENC_SYM_TERROR;
-	}
-
-	int pin = lbm_dec_as_i32(args[0]);
-	if (!utils_gpio_is_valid(pin)) {
-		lbm_set_error_reason(string_pin_invalid);
-		return ENC_SYM_TERROR;
-	}
-
-	unsigned int timing_preset = 0;
-	if (argn >= 2) {
-		timing_preset = lbm_dec_as_u32(args[1]);
-	}
-
+static bool rgbled_init_core(int pin, unsigned int timing_preset, const char **err_reason) {
 	// Skip full reinit if already configured on the same pin with the same type.
 	// Avoids tearing down the RMT channel every frame, which leaves the pin floating.
 	if (pin == led_pin_driver && timing_preset == led_timing_driver && led_chan != NULL) {
-		return ENC_SYM_TRUE;
+		return true;
 	}
 
 	rgbled_deinit_internal(1); // Pull/Hold LOW when switching pins
@@ -275,19 +264,55 @@ static lbm_value ext_rgbled_init(lbm_value *args, lbm_uint argn) {
 	if (rmt_new_tx_channel(&tx_chan_config, &led_chan) != ESP_OK) {
 		led_chan = NULL;
 		led_pin_driver = -1;
-		lbm_set_error_reason("RMT channel init failed");
-		return ENC_SYM_EERROR;
+		if (err_reason) {
+			*err_reason = "RMT channel init failed";
+		}
+		return false;
 	}
 
 	if (rmt_new_led_strip_encoder(&led_encoder) != ESP_OK) {
 		rmt_del_channel(led_chan);
 		led_chan = NULL;
 		led_pin_driver = -1;
-		lbm_set_error_reason("RMT encoder init failed");
-		return ENC_SYM_EERROR;
+		if (err_reason) {
+			*err_reason = "RMT encoder init failed";
+		}
+		return false;
 	}
 
 	rmt_enable(led_chan);
+
+	return true;
+}
+
+bool rgbled_init(int pin) {
+	return rgbled_init_core(pin, 0, NULL);
+}
+
+static lbm_value ext_rgbled_init(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_NUMBER_ALL();
+
+	if (argn < 1 || argn > 2) {
+		lbm_set_error_reason((char*)lbm_error_str_num_args);
+		return ENC_SYM_TERROR;
+	}
+
+	int pin = lbm_dec_as_i32(args[0]);
+	if (!utils_gpio_is_valid(pin)) {
+		lbm_set_error_reason(string_pin_invalid);
+		return ENC_SYM_TERROR;
+	}
+
+	unsigned int timing_preset = 0;
+	if (argn >= 2) {
+		timing_preset = lbm_dec_as_u32(args[1]);
+	}
+
+	const char *err_reason = NULL;
+	if (!rgbled_init_core(pin, timing_preset, &err_reason)) {
+		lbm_set_error_reason((char*)err_reason);
+		return ENC_SYM_EERROR;
+	}
 
 	return ENC_SYM_TRUE;
 }
@@ -300,7 +325,7 @@ static lbm_value ext_rgbled_color_buffer(lbm_value *args, lbm_uint argn) {
 	uint8_t type_led = 0;
 	if (argn >= 2) {
 		type_led = lbm_dec_as_u32(args[1]);
-		if (type_led >= 4) {
+		if (type_led > 4) {
 			lbm_set_error_reason("Invalid LED type");
 			return ENC_SYM_TERROR;
 		}
@@ -332,7 +357,7 @@ static lbm_value ext_rgbled_color_buffer(lbm_value *args, lbm_uint argn) {
 }
 
 static lbm_value ext_rgbled_color(lbm_value *args, lbm_uint argn) {
-	if ((argn != 3 && argn != 4) || !lbm_is_array_rw(args[0]) ||
+	if ((argn != 3 && argn != 4) || !lbm_is_array_r(args[0]) ||
 			!lbm_is_number(args[1]) || (!lbm_is_number(args[2]) && !lbm_is_list(args[2]))) {
 		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
 		return ENC_SYM_TERROR;
@@ -350,7 +375,7 @@ static lbm_value ext_rgbled_color(lbm_value *args, lbm_uint argn) {
 	char *invalid_arr_msg = "Invalid LED array";
 
 	uint8_t type_led = led_data[0] & 0x0F;
-	if (type_led >= 4) {
+	if (type_led > 4) {
 		lbm_set_error_reason(invalid_arr_msg);
 		return ENC_SYM_TERROR;
 	}
@@ -469,6 +494,16 @@ static lbm_value ext_rgbled_color(lbm_value *args, lbm_uint argn) {
 	}
 
 	return ENC_SYM_TRUE;
+}
+
+void rgbled_update(uint8_t * data, size_t size) {
+	if (size < 1 || led_chan == NULL || led_encoder == NULL) {
+		return;
+	}
+
+	// Wait for any in-progress transmission to complete before sending new data.
+	rmt_tx_wait_all_done(led_chan, pdMS_TO_TICKS(100));
+	rmt_transmit(led_chan, led_encoder, data, size, &tx_config);
 }
 
 static lbm_value ext_rgbled_update(lbm_value *args, lbm_uint argn) {

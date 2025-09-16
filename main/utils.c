@@ -23,6 +23,7 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs.h"
+#include "esp_memory_utils.h"
 
 #include <sys/time.h>
 #include <dirent.h>
@@ -30,6 +31,9 @@
 
 // Global variables
 char *string_pin_invalid = "Invalid pin";
+
+static portMUX_TYPE sys_lock_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int sys_lock_cnt = 0;
 
 int32_t utils_ms_today(void) {
 	struct timeval tv;
@@ -193,4 +197,23 @@ bool utils_gpio_is_valid(int pin) {
 		return false;
 	}
 	return (SOC_GPIO_VALID_GPIO_MASK >> pin) & 1;
+}
+
+void utils_sys_lock_cnt(void) {
+    taskENTER_CRITICAL(&sys_lock_mux);
+    sys_lock_cnt++;
+    // Do not exit critical until matching unlock
+}
+
+void utils_sys_unlock_cnt(void) {
+    if (sys_lock_cnt > 0) {
+        sys_lock_cnt--;
+        if (sys_lock_cnt == 0) {
+            taskEXIT_CRITICAL(&sys_lock_mux);
+        }
+    }
+}
+
+bool utils_is_func_valid (void * func){
+	return esp_ptr_executable(func);
 }
