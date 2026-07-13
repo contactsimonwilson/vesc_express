@@ -21,6 +21,7 @@
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "heap_memory_layout.h"
 #include "ahrs.h"
 #include "commands.h"
@@ -810,21 +811,41 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 			return res;
 		}
 
-		uint8_t *img_iram = heap_caps_malloc(
-			image_size, MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL);
-		if (!img_iram) {
+		// The image needs RAM that is byte-accessible through the DRAM
+		// alias (strings/data reads) AND executable through the IRAM
+		// alias, i.e. real D/IRAM. Allocating with MALLOC_CAP_EXEC can
+		// return pure-IRAM blocks without a data alias (e.g. the spare
+		// instruction-cache 16K), so allocate from the data side and keep
+		// only D/IRAM blocks.
+		uint8_t *img_dram = NULL;
+		void *rejects[4];
+		int n_rej = 0;
+		while (n_rej < 4) {
+			img_dram = heap_caps_malloc(
+				image_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+			if (!img_dram || esp_ptr_in_diram_dram(img_dram)) {
+				break;
+			}
+			rejects[n_rej++] = img_dram;
+			img_dram = NULL;
+		}
+		for (int i = 0; i < n_rej; i++) {
+			heap_caps_free(rejects[i]);
+		}
+
+		if (!img_dram) {
 			static char err_buf[80];
 			snprintf(err_buf, sizeof(err_buf),
-				"Out of executable memory for lib: need %u, largest free %u",
+				"Out of D/IRAM for lib: need %u, largest free %u",
 				(unsigned)image_size,
 				(unsigned)heap_caps_get_largest_free_block(
-					MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL));
+					MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 			lbm_set_error_reason(err_buf);
 			return res;
 		}
-		// The same RAM is byte-accessible through the DRAM alias.
-		uint8_t *img_dram =
-			(uint8_t *)MAP_IRAM_TO_DRAM((uint32_t)img_iram);
+
+		uint8_t *img_iram =
+			(uint8_t *)MAP_DRAM_TO_IRAM((uint32_t)img_dram);
 
 		const uint8_t *relocs = container_drom + 16;
 		memcpy(img_dram, relocs + reloc_count * 4, image_size);
@@ -851,7 +872,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		uint32_t inner_magic = 0;
 		memcpy(&inner_magic, img_dram, 4);
 		if (!patch_ok || inner_magic != __builtin_bswap32(NATIVE_LIB_MAGIC)) {
-			heap_caps_free(img_iram);
+			heap_caps_free(img_dram);
 			lbm_set_error_reason("Invalid relocation table in native lib");
 			return res;
 		}
@@ -861,7 +882,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 		base_addr  = (uint32_t)img_dram;
 		entry_addr = (uint32_t)img_iram + entry_offset;
-		ram_alloc  = img_iram;
+		ram_alloc  = img_dram;
 #else
 		lbm_set_error_reason(
 			"Relocatable libs are only supported on the ESP32-S3");
