@@ -87,6 +87,83 @@ static uint32_t lib_flash_addr[LIB_NUM_MAX] = {0};
 // Heap allocation backing a RAM-loaded lib, NULL for XIP libs.
 static void *lib_ram_alloc[LIB_NUM_MAX] = {0};
 
+#if CONFIG_IDF_TARGET_ESP32S3
+// D/IRAM pool for RAM-loaded libs, reserved early at boot before the
+// LispBM and radio allocations fragment the internal heap (a lib image
+// needs one contiguous executable + byte-accessible block, which is
+// rarely available later). Grabbed once by lispif_lib_pool_prereserve
+// and never returned; a simple bump allocator serves lib loads and
+// resets when every lib is unloaded (lisp restart).
+#define LIB_POOL_SIZE (20 * 1024)
+static uint8_t *lib_pool = NULL; // DRAM alias
+static uint32_t lib_pool_used = 0;
+static int lib_pool_allocs = 0;
+
+static bool ptr_in_lib_pool(const void *p) {
+	return lib_pool && (const uint8_t *)p >= lib_pool
+		&& (const uint8_t *)p < lib_pool + LIB_POOL_SIZE;
+}
+
+// Allocate a D/IRAM block from the exec heap: reject pure-IRAM blocks
+// (no data alias) until the allocator falls through to real D/IRAM.
+static void *diram_exec_malloc(uint32_t size) {
+	void *ptr = NULL;
+	void *rejects[8];
+	int n_rej = 0;
+	while (n_rej < 8) {
+		ptr = heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL);
+		if (!ptr || esp_ptr_in_diram_iram(ptr)) {
+			break;
+		}
+		rejects[n_rej++] = ptr;
+		ptr = NULL;
+	}
+	for (int i = 0; i < n_rej; i++) {
+		heap_caps_free(rejects[i]);
+	}
+	return ptr;
+}
+
+void lispif_lib_pool_prereserve(uint32_t lbm_bytes_needed) {
+	if (lib_pool) {
+		return;
+	}
+
+	void *pool_iram = diram_exec_malloc(LIB_POOL_SIZE);
+	if (!pool_iram) {
+		return;
+	}
+
+	// LispBM starting up matters more than native libs: give the pool
+	// back if its biggest upcoming allocation would no longer fit.
+	if (heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)
+		< lbm_bytes_needed + 8192) {
+		heap_caps_free(pool_iram);
+		return;
+	}
+
+	lib_pool = (uint8_t *)MAP_IRAM_TO_DRAM((uint32_t)pool_iram);
+}
+
+static void lib_ram_free_one(void *p) {
+	if (ptr_in_lib_pool(p)) {
+		if (lib_pool_allocs > 0 && --lib_pool_allocs == 0) {
+			lib_pool_used = 0;
+		}
+	} else {
+		heap_caps_free(p);
+	}
+}
+#else
+void lispif_lib_pool_prereserve(uint32_t lbm_bytes_needed) {
+	(void)lbm_bytes_needed;
+}
+
+static void lib_ram_free_one(void *p) {
+	heap_caps_free(p);
+}
+#endif
+
 __attribute__((section(".libif"))) static volatile union {
 	vesc_c_if cif;
 	char pad[2048];
@@ -495,7 +572,7 @@ void lispif_stop_lib(void) {
 	// gone, as their code lives in these allocations.
 	for (int i = 0; i < LIB_NUM_MAX; i++) {
 		if (lib_ram_alloc[i]) {
-			heap_caps_free(lib_ram_alloc[i]);
+			lib_ram_free_one(lib_ram_alloc[i]);
 			lib_ram_alloc[i] = NULL;
 		}
 	}
@@ -813,40 +890,41 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 		// The image needs RAM that is byte-accessible through the DRAM
 		// alias (strings/data reads) AND executable through the IRAM
-		// alias, i.e. real D/IRAM. The exec heap also contains pure-IRAM
-		// blocks without a data alias (the spare instruction-cache 16K,
-		// which the allocator prefers) - reject those until the allocator
-		// falls through to a D/IRAM block. The pure-IRAM region is small,
-		// so a few rejects always exhaust it.
-		uint8_t *img_iram = NULL;
-		void *rejects[8];
-		int n_rej = 0;
-		while (n_rej < 8) {
-			img_iram = heap_caps_malloc(
-				image_size, MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL);
-			if (!img_iram || esp_ptr_in_diram_iram(img_iram)) {
-				break;
+		// alias, i.e. real D/IRAM. Serve it from the boot-time pool when
+		// possible - the internal heap is usually too fragmented for a
+		// contiguous block by the time lisp code runs - and fall back to
+		// a D/IRAM heap allocation otherwise.
+		uint8_t *img_dram = NULL;
+		void *alloc_ptr = NULL;
+
+		uint32_t aligned_size = (image_size + 7) & ~7u;
+		if (lib_pool && lib_pool_used + aligned_size <= LIB_POOL_SIZE) {
+			img_dram = lib_pool + lib_pool_used;
+			lib_pool_used += aligned_size;
+			lib_pool_allocs++;
+			alloc_ptr = img_dram;
+		} else {
+			void *heap_iram = diram_exec_malloc(image_size);
+			if (heap_iram) {
+				img_dram = (uint8_t *)MAP_IRAM_TO_DRAM((uint32_t)heap_iram);
+				alloc_ptr = heap_iram;
 			}
-			rejects[n_rej++] = img_iram;
-			img_iram = NULL;
-		}
-		for (int i = 0; i < n_rej; i++) {
-			heap_caps_free(rejects[i]);
 		}
 
-		if (!img_iram) {
-			static char err_buf[80];
+		if (!img_dram) {
+			static char err_buf[96];
 			snprintf(err_buf, sizeof(err_buf),
-				"Out of D/IRAM for lib: need %u, largest exec free %u",
+				"Out of D/IRAM for lib: need %u, pool free %u, largest exec free %u",
 				(unsigned)image_size,
+				(unsigned)(lib_pool ? LIB_POOL_SIZE - lib_pool_used : 0),
 				(unsigned)heap_caps_get_largest_free_block(
 					MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL));
 			lbm_set_error_reason(err_buf);
 			return res;
 		}
 
-		uint8_t *img_dram =
-			(uint8_t *)MAP_IRAM_TO_DRAM((uint32_t)img_iram);
+		uint8_t *img_iram =
+			(uint8_t *)MAP_DRAM_TO_IRAM((uint32_t)img_dram);
 
 		const uint8_t *relocs = container_drom + 16;
 		memcpy(img_dram, relocs + reloc_count * 4, image_size);
@@ -873,7 +951,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		uint32_t inner_magic = 0;
 		memcpy(&inner_magic, img_dram, 4);
 		if (!patch_ok || inner_magic != __builtin_bswap32(NATIVE_LIB_MAGIC)) {
-			heap_caps_free(img_iram);
+			lib_ram_free_one(alloc_ptr);
 			lbm_set_error_reason("Invalid relocation table in native lib");
 			return res;
 		}
@@ -883,7 +961,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 		base_addr  = (uint32_t)img_dram;
 		entry_addr = (uint32_t)img_iram + entry_offset;
-		ram_alloc  = img_iram;
+		ram_alloc  = alloc_ptr;
 #else
 		lbm_set_error_reason(
 			"Relocatable libs are only supported on the ESP32-S3");
@@ -923,7 +1001,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 	loaded_libs[slot].arg       = NULL;
 	lib_flash_addr[slot]        = 0;
 	if (lib_ram_alloc[slot]) {
-		heap_caps_free(lib_ram_alloc[slot]);
+		lib_ram_free_one(lib_ram_alloc[slot]);
 		lib_ram_alloc[slot] = NULL;
 	}
 
@@ -952,7 +1030,7 @@ lbm_value ext_unload_native_lib(lbm_value *args, lbm_uint argn) {
 			loaded_libs[i].arg       = NULL;
 			lib_flash_addr[i]        = 0;
 			if (lib_ram_alloc[i]) {
-				heap_caps_free(lib_ram_alloc[i]);
+				lib_ram_free_one(lib_ram_alloc[i]);
 				lib_ram_alloc[i] = NULL;
 			}
 

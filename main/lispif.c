@@ -139,6 +139,17 @@ void lispif_init(void) {
 	}
 #endif
 
+	// Reserve the native-lib RAM pool now, while a contiguous D/IRAM
+	// block still exists. The check inside gives it back if LispBM's own
+	// allocations below would no longer fit.
+	{
+		uint32_t lbm_max_alloc = mem_size * sizeof(uint32_t);
+		if (heap_size * sizeof(lbm_cons_t) > lbm_max_alloc) {
+			lbm_max_alloc = heap_size * sizeof(lbm_cons_t);
+		}
+		lispif_lib_pool_prereserve(lbm_max_alloc);
+	}
+
 #ifdef CONFIG_SPIRAM
 	heap_size = LBM_PSRAM_HEAP_BYTES / sizeof(lbm_cons_t);
 	heap = heap_caps_aligned_alloc(8, heap_size * sizeof(lbm_cons_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
