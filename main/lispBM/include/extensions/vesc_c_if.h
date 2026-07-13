@@ -726,7 +726,35 @@ typedef struct {
 #ifdef ESP_PLATFORM
 // System tick rate. Can be used to convert system ticks to time
 #define SYSTEM_TICK_RATE_HZ 1000
+
+/*
+ * Address of the firmware-side C interface table. It must match the address
+ * of the .libif section in main/linker_libif_<target>.ld for the target the
+ * firmware (and the native library) is built for.
+ *
+ * The firmware build picks the target up from sdkconfig automatically. When
+ * building a native library out of tree, define the CONFIG_IDF_TARGET_*
+ * macro matching the hardware you are building for, e.g.
+ * -DCONFIG_IDF_TARGET_ESP32C3=1. A library only works on the target it was
+ * built for.
+ */
+#if defined(__has_include)
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+#endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
 #define VESC_IF		((vesc_c_if*)(0x3FCCF800))
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+#define VESC_IF		((vesc_c_if*)(0x3FCE8800))
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+#define VESC_IF		((vesc_c_if*)(0x4087B800))
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+#define VESC_IF		((vesc_c_if*)(0x4FF3A000))
+#else
+#error "Unknown ESP target. Define CONFIG_IDF_TARGET_ESP32C3, -S3, -C6 or -P4 when building a native library."
+#endif
 #else
 // System tick rate. Can be used to convert system ticks to time
 #define SYSTEM_TICK_RATE_HZ 10000

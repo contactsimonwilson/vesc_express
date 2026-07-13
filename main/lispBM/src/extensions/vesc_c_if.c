@@ -16,8 +16,10 @@
 
 #pragma GCC optimize("Os")
 #include <string.h>
+#include <stdlib.h>
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "heap_memory_layout.h"
 #include "ahrs.h"
 #include "commands.h"
 #include "comm_can.h"
@@ -78,6 +80,11 @@ __attribute__((section(".libif"))) static volatile union {
 	vesc_c_if cif;
 	char pad[2048];
 } cif;
+
+// The .libif section is placed at a fixed, target-specific address by
+// main/linker_libif_<target>.ld so that native libs can find the interface
+// table through the VESC_IF macro. Keep the heap allocator away from it.
+SOC_RESERVE_MEMORY_REGION((intptr_t)&cif, (intptr_t)&cif + sizeof(cif), vesc_libif);
 
 static bool lib_init_done = false;
 
@@ -197,8 +204,7 @@ static void lib_request_terminate(lib_thread thd) {
 			if (timeout <= 0) {
 				commands_printf_lisp("Thread did not exit. Crashing...");
 				vTaskDelay(pdMS_TO_TICKS(20));
-				taskENTER_CRITICAL(NULL);
-				for (;;) { __NOP(); }
+				abort();
 			}
 
 			return;
@@ -455,13 +461,23 @@ void lispif_stop_lib(void) {
 			loaded_libs[i].arg       = NULL;
 		}
 	}
+	// 2) Terminate remaining lib threads. Snapshot the handles under the
+	// lock, but request termination outside of it as lib_request_terminate
+	// blocks and blocking is not allowed in a critical section.
+	TaskHandle_t handles[LIB_MAX_THREADS];
+	size_t handle_cnt = 0;
+
 	LIB_THR_LOCK();
-for (size_t i = 0; i < lib_thread_infos_cnt; i++) {
-	if (lib_thread_infos[i] && lib_thread_infos[i]->handle) {
-		lib_request_terminate(lib_thread_infos[i]->handle);
+	for (size_t i = 0; i < lib_thread_infos_cnt; i++) {
+		if (lib_thread_infos[i] && lib_thread_infos[i]->handle) {
+			handles[handle_cnt++] = lib_thread_infos[i]->handle;
+		}
 	}
-}
 	LIB_THR_UNLOCK();
+
+	for (size_t i = 0; i < handle_cnt; i++) {
+		lib_request_terminate(handles[i]);
+	}
 }
 
 void commands_process_packet_wrapper(
@@ -478,6 +494,13 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 	// Expect a single numeric argument containing the IROM base address
 	if (argn != 1 || !lbm_is_number(args[0])) {
+		return res;
+	}
+
+	// The linker script and VESC_IF must agree on where the interface table
+	// lives, otherwise libs would read garbage function pointers.
+	if ((uintptr_t)&cif != (uintptr_t)VESC_IF) {
+		lbm_set_error_reason("Native lib interface address mismatch (firmware bug)");
 		return res;
 	}
 
@@ -701,9 +724,10 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		return res;
 	}
 
-	// Validate native header magic
+	// Validate native header magic. Read through the DROM alias, as data
+	// reads through the instruction bus fault on some targets.
 	uint32_t magic_be = 0;
-	memcpy(&magic_be, (const void *)irom_base, sizeof(magic_be));
+	memcpy(&magic_be, utils_irom_to_drom((void *)irom_base), sizeof(magic_be));
 	if (magic_be != __builtin_bswap32(NATIVE_LIB_MAGIC)) {
 		lbm_set_error_reason("Magic number not found at IROM address");
 		return res;

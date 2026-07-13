@@ -56,3 +56,18 @@ idf.py build -DHW_NAME="VESC Express T"
 ```
 
 **Note:** If you ever change the environment variables, or if when you first start using them, you need to first run `idf.py reconfigure` before building (with the environment variables still set of course!), as the build system unfortunately can't automatically detect this change. Running `idf.py fullclean` has the same effect as this forces cmake to rebuild the build configurations.
+
+### Native Libraries
+
+Native C libraries can be loaded at runtime with the `load-native-lib` LispBM extension. The library binary is included as an import in the Lisp code, executes in place from flash (XIP) and talks to the firmware through the interface table defined in `main/lispBM/include/extensions/vesc_c_if.h`.
+
+The interface table lives at a fixed, target-specific address (the `.libif` section, placed by `main/linker_libif_<target>.ld`):
+
+| Target   | VESC_IF address |
+|----------|-----------------|
+| esp32c3  | `0x3FCCF800`    |
+| esp32s3  | `0x3FCE8800`    |
+| esp32c6  | `0x4087B800`    |
+| esp32p4  | `0x4FF3A000`    |
+
+When building a native library out of tree, compile it with the toolchain matching the chip (Xtensa for S3, RISC-V for C3/C6/P4) and define `ESP_PLATFORM` plus the `CONFIG_IDF_TARGET_*` macro for the hardware you target, e.g. `-DESP_PLATFORM -DCONFIG_IDF_TARGET_ESP32C3=1`. A library only runs on the target it was built for.
