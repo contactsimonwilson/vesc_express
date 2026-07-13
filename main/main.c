@@ -76,13 +76,6 @@ void app_main(void) {
 	tv.tv_usec = 0;
 	settimeofday(&tv, NULL);
 
-	// Reserve the native-lib RAM pool first thing, while the internal heap
-	// is still pristine - the radio stacks and LispBM fragment it beyond
-	// use later. The argument is a conservative bound on the largest
-	// single allocation LispBM makes later; the pool is skipped if that
-	// would no longer fit.
-	lispif_lib_pool_prereserve(96 * 1024);
-
 	esp_err_t ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
 		nvs_flash_erase();

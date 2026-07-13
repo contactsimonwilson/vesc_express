@@ -88,24 +88,26 @@ static uint32_t lib_flash_addr[LIB_NUM_MAX] = {0};
 static void *lib_ram_alloc[LIB_NUM_MAX] = {0};
 
 #if CONFIG_IDF_TARGET_ESP32S3
-// D/IRAM pool for RAM-loaded libs, reserved early at boot before the
-// LispBM and radio allocations fragment the internal heap (a lib image
-// needs one contiguous executable + byte-accessible block, which is
-// rarely available later). Grabbed once by lispif_lib_pool_prereserve
-// and never returned; a simple bump allocator serves lib loads and
-// resets when every lib is unloaded (lisp restart).
+// Static D/IRAM pool for RAM-loaded libs. Static .bss lives in the
+// D/IRAM address range and is executable through the IRAM alias with
+// memory protection off, and unlike a heap reservation it cannot
+// fragment the heap: the heap region simply starts a little higher, and
+// the linker fails the build if it does not fit. A simple bump
+// allocator serves lib loads and resets when every lib is unloaded
+// (lisp restart), so restarts always reuse the same bytes.
 #define LIB_POOL_SIZE (20 * 1024)
-static uint8_t *lib_pool = NULL; // DRAM alias
+static uint8_t lib_pool[LIB_POOL_SIZE] __attribute__((aligned(8)));
 static uint32_t lib_pool_used = 0;
 static int lib_pool_allocs = 0;
 
 static bool ptr_in_lib_pool(const void *p) {
-	return lib_pool && (const uint8_t *)p >= lib_pool
+	return (const uint8_t *)p >= lib_pool
 		&& (const uint8_t *)p < lib_pool + LIB_POOL_SIZE;
 }
 
 // Allocate a D/IRAM block from the exec heap: reject pure-IRAM blocks
 // (no data alias) until the allocator falls through to real D/IRAM.
+// Fallback for when the pool is full.
 static void *diram_exec_malloc(uint32_t size) {
 	void *ptr = NULL;
 	void *rejects[8];
@@ -124,27 +126,6 @@ static void *diram_exec_malloc(uint32_t size) {
 	return ptr;
 }
 
-void lispif_lib_pool_prereserve(uint32_t lbm_bytes_needed) {
-	if (lib_pool) {
-		return;
-	}
-
-	void *pool_iram = diram_exec_malloc(LIB_POOL_SIZE);
-	if (!pool_iram) {
-		return;
-	}
-
-	// LispBM starting up matters more than native libs: give the pool
-	// back if its biggest upcoming allocation would no longer fit.
-	if (heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)
-		< lbm_bytes_needed + 8192) {
-		heap_caps_free(pool_iram);
-		return;
-	}
-
-	lib_pool = (uint8_t *)MAP_IRAM_TO_DRAM((uint32_t)pool_iram);
-}
-
 static void lib_ram_free_one(void *p) {
 	if (ptr_in_lib_pool(p)) {
 		if (lib_pool_allocs > 0 && --lib_pool_allocs == 0) {
@@ -155,10 +136,6 @@ static void lib_ram_free_one(void *p) {
 	}
 }
 #else
-void lispif_lib_pool_prereserve(uint32_t lbm_bytes_needed) {
-	(void)lbm_bytes_needed;
-}
-
 static void lib_ram_free_one(void *p) {
 	heap_caps_free(p);
 }

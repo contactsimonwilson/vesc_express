@@ -139,12 +139,6 @@ void lispif_init(void) {
 	}
 #endif
 
-	// Second chance for the native-lib RAM pool (normally reserved first
-	// thing in app_main). Guard with the SUM of the allocations below so
-	// the pool can never starve them.
-	lispif_lib_pool_prereserve(heap_size * sizeof(lbm_cons_t)
-		+ (mem_size + bitmap_size) * sizeof(uint32_t));
-
 #ifdef CONFIG_SPIRAM
 	heap_size = LBM_PSRAM_HEAP_BYTES / sizeof(lbm_cons_t);
 	heap = heap_caps_aligned_alloc(8, heap_size * sizeof(lbm_cons_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

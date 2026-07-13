@@ -36,10 +36,6 @@ void lispif_lock_lbm(void);
 void lispif_unlock_lbm(void);
 void lispif_stop(void);
 void lispif_stop_lib(void);
-// Reserve the native-lib RAM pool before the big LispBM allocations
-// fragment the internal heap (ESP32-S3 only, no-op elsewhere). The
-// argument is the largest single allocation LispBM is about to make.
-void lispif_lib_pool_prereserve(uint32_t lbm_bytes_needed);
 bool lispif_restart(bool print, bool load_code, bool load_imports);
 void lispif_disable_all_events(void);
 void lispif_free(void *ptr);
