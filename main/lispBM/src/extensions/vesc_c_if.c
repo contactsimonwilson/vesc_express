@@ -875,7 +875,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		void *alloc_ptr = NULL;
 
 		uint32_t aligned_size = (image_size + 7) & ~7u;
-		if (lib_pool && lib_pool_used + aligned_size <= LIB_POOL_SIZE) {
+		if (lib_pool_used + aligned_size <= LIB_POOL_SIZE) {
 			img_dram = lib_pool + lib_pool_used;
 			lib_pool_used += aligned_size;
 			lib_pool_allocs++;
@@ -893,7 +893,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 			snprintf(err_buf, sizeof(err_buf),
 				"Out of D/IRAM for lib: need %u, pool free %u, largest exec free %u",
 				(unsigned)image_size,
-				(unsigned)(lib_pool ? LIB_POOL_SIZE - lib_pool_used : 0),
+				(unsigned)(LIB_POOL_SIZE - lib_pool_used),
 				(unsigned)heap_caps_get_largest_free_block(
 					MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL));
 			lbm_set_error_reason(err_buf);
