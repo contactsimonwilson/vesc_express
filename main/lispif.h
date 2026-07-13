@@ -27,6 +27,7 @@
 #include "lispbm.h"
 
 #define NATIVE_LIB_MAGIC 0xCAFEBABE
+#define NATIVE_LIB_RELOC_MAGIC 0xCAFEBABF
 
 // Functions
 void lispif_init(void);

@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "esp_heap_caps.h"
 #include "heap_memory_layout.h"
 #include "ahrs.h"
 #include "commands.h"
@@ -75,6 +76,14 @@ static portMUX_TYPE lib_thr_mux = portMUX_INITIALIZER_UNLOCKED;
 #define LIB_NUM_MAX 10
 
 static lib_info loaded_libs[LIB_NUM_MAX] = {0};
+
+// The flash (IROM) address of each loaded lib's container, i.e. the value
+// the lisp code passes to load-native-lib / unload-native-lib. For XIP libs
+// this equals base_addr; for RAM-loaded (relocated) libs it differs.
+static uint32_t lib_flash_addr[LIB_NUM_MAX] = {0};
+
+// Heap allocation backing a RAM-loaded lib, NULL for XIP libs.
+static void *lib_ram_alloc[LIB_NUM_MAX] = {0};
 
 __attribute__((section(".libif"))) static volatile union {
 	vesc_c_if cif;
@@ -459,6 +468,7 @@ void lispif_stop_lib(void) {
 			loaded_libs[i].stop_fun  = NULL;
 			loaded_libs[i].base_addr = 0;
 			loaded_libs[i].arg       = NULL;
+			lib_flash_addr[i]        = 0;
 		}
 	}
 	// 2) Terminate remaining lib threads. Snapshot the handles under the
@@ -477,6 +487,15 @@ void lispif_stop_lib(void) {
 
 	for (size_t i = 0; i < handle_cnt; i++) {
 		lib_request_terminate(handles[i]);
+	}
+
+	// 3) Free RAM-loaded lib images. Done last, after every lib thread is
+	// gone, as their code lives in these allocations.
+	for (int i = 0; i < LIB_NUM_MAX; i++) {
+		if (lib_ram_alloc[i]) {
+			heap_caps_free(lib_ram_alloc[i]);
+			lib_ram_alloc[i] = NULL;
+		}
 	}
 }
 
@@ -726,79 +745,150 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 	// Validate native header magic. Read through the DROM alias, as data
 	// reads through the instruction bus fault on some targets.
+	const uint8_t *container_drom = utils_irom_to_drom((void *)irom_base);
 	uint32_t magic_be = 0;
-	memcpy(&magic_be, utils_irom_to_drom((void *)irom_base), sizeof(magic_be));
-	if (magic_be != __builtin_bswap32(NATIVE_LIB_MAGIC)) {
+	memcpy(&magic_be, container_drom, sizeof(magic_be));
+
+	bool is_reloc = magic_be == __builtin_bswap32(NATIVE_LIB_RELOC_MAGIC);
+	if (!is_reloc && magic_be != __builtin_bswap32(NATIVE_LIB_MAGIC)) {
 		lbm_set_error_reason("Magic number not found at IROM address");
 		return res;
 	}
 
-	// Duplicate check by IROM base
+	// Duplicate check by container flash address
 	for (int i = 0; i < LIB_NUM_MAX; i++) {
 		if (loaded_libs[i].stop_fun != NULL
-			&& loaded_libs[i].base_addr == irom_base) {
+			&& lib_flash_addr[i] == irom_base) {
 			lbm_set_error_reason("Library already loaded");
 			return res;
 		}
 	}
-	bool had_slot = false;
-	bool ok       = false;
+
+	int slot = -1;
 	for (int i = 0; i < LIB_NUM_MAX; i++) {
 		if (loaded_libs[i].stop_fun == NULL) {
-			had_slot                 = true;
-			loaded_libs[i].base_addr = irom_base;
-
-			// Entry is after header: magic(4) + prog_addr(4) = 8 bytes
-			uint32_t func_addr = irom_base + 8;
-			if (func_addr & 0x3) {
-				lbm_set_error_reason("IROM function address not aligned");
-				return res;
-			}
-
-			//commands_printf_lisp("Calling init function at 0x%08X", func_addr);
-			ok = ((bool (*)(lib_info *))func_addr)(&loaded_libs[i]);
-
-			if (loaded_libs[i].stop_fun != NULL) {
-				void *stop_fun_irom =
-					utils_drom_to_irom(loaded_libs[i].stop_fun);
-				if (!utils_is_func_valid(stop_fun_irom)) {
-					loaded_libs[i].stop_fun  = NULL;
-					loaded_libs[i].base_addr = 0;
-					loaded_libs[i].arg       = NULL;
-					lbm_set_error_reason(
-						"Invalid stop function. Must be static."
-					);
-					return res;
-				}
-				loaded_libs[i].stop_fun = stop_fun_irom;
-				//commands_printf_lisp("Library init successful");
-			} else {
-				lbm_set_error_reason(
-					"Library init failed - no stop function set"
-				);
-			}
+			slot = i;
 			break;
 		}
 	}
+	if (slot < 0) {
+		lbm_set_error_reason("Library table full");
+		return res;
+	}
 
-	if (ok) {
-		//commands_printf_lisp("=== LOAD SUCCESS ===");
-		res = lbm_enc_sym(SYM_TRUE);
-	} else {
-		if (!had_slot) {
-			lbm_set_error_reason("Library table full");
+	// base_addr is where the lib image lives at runtime (prog_ptr at +4),
+	// entry_addr is the init function.
+	uint32_t base_addr;
+	uint32_t entry_addr;
+	void *ram_alloc = NULL;
+
+	if (is_reloc) {
+#if CONFIG_IDF_TARGET_ESP32S3
+		// Xtensa cannot run position-independent code in place, so the
+		// container carries a relocation table and the image is copied to
+		// executable RAM and patched with its load address. Container
+		// layout after the magic: image_size, entry_offset, reloc_count
+		// (all LE u32), relocs[], image[].
+		uint32_t image_size, entry_offset, reloc_count;
+		memcpy(&image_size, container_drom + 4, 4);
+		memcpy(&entry_offset, container_drom + 8, 4);
+		memcpy(&reloc_count, container_drom + 12, 4);
+
+		if (image_size < 12 || image_size > 0x80000 || (image_size & 3)
+			|| entry_offset < 8 || entry_offset >= image_size
+			|| (entry_offset & 3) || reloc_count > image_size / 4) {
+			lbm_set_error_reason("Invalid native lib container");
 			return res;
 		}
-		// rollback if we reserved a slot but init returned false
-		for (int i = 0; i < LIB_NUM_MAX; i++) {
-			if (loaded_libs[i].base_addr == irom_base
-				&& loaded_libs[i].stop_fun == NULL) {
-				loaded_libs[i].base_addr = 0;
-				loaded_libs[i].arg       = NULL;
+
+		uint8_t *img_iram = heap_caps_malloc(
+			image_size, MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL);
+		if (!img_iram) {
+			lbm_set_error_reason("Not enough executable memory for lib "
+				"(CONFIG_ESP_SYSTEM_MEMPROT_FEATURE must be disabled)");
+			return res;
+		}
+		// The same RAM is byte-accessible through the DRAM alias.
+		uint8_t *img_dram =
+			(uint8_t *)MAP_IRAM_TO_DRAM((uint32_t)img_iram);
+
+		const uint8_t *relocs = container_drom + 16;
+		memcpy(img_dram, relocs + reloc_count * 4, image_size);
+
+		// Patch every absolute word with the load address: pointers into
+		// executable sections get the IRAM alias, everything else the
+		// DRAM alias. The image starts with the magic word, so ELF
+		// address 0 lives at image offset 4.
+		bool patch_ok = true;
+		for (uint32_t r = 0; r < reloc_count; r++) {
+			uint32_t e;
+			memcpy(&e, relocs + r * 4, 4);
+			uint32_t off = e & 0x7FFFFFFF;
+			if (off < 4 || (off & 3) || off + 4 > image_size) {
+				patch_ok = false;
 				break;
 			}
+			uint32_t word;
+			memcpy(&word, img_dram + off, 4);
+			word += (uint32_t)((e & 0x80000000) ? img_iram : img_dram) + 4;
+			memcpy(img_dram + off, &word, 4);
 		}
+
+		uint32_t inner_magic = 0;
+		memcpy(&inner_magic, img_dram, 4);
+		if (!patch_ok || inner_magic != __builtin_bswap32(NATIVE_LIB_MAGIC)) {
+			heap_caps_free(img_iram);
+			lbm_set_error_reason("Invalid relocation table in native lib");
+			return res;
+		}
+
+		// Make the copied and patched code visible to instruction fetch.
+		__asm__ __volatile__("memw\n\tisync\n\t" ::: "memory");
+
+		base_addr  = (uint32_t)img_dram;
+		entry_addr = (uint32_t)img_iram + entry_offset;
+		ram_alloc  = img_iram;
+#else
+		lbm_set_error_reason(
+			"Relocatable libs are only supported on the ESP32-S3");
+		return res;
+#endif
+	} else {
+		// XIP: runs in place from flash. Entry is after the header:
+		// magic(4) + prog_addr(4) = 8 bytes.
+		base_addr  = irom_base;
+		entry_addr = irom_base + 8;
+	}
+
+	loaded_libs[slot].base_addr = base_addr;
+	lib_flash_addr[slot]        = irom_base;
+	lib_ram_alloc[slot]         = ram_alloc;
+
+	//commands_printf_lisp("Calling init function at 0x%08X", entry_addr);
+	bool ok = ((bool (*)(lib_info *))entry_addr)(&loaded_libs[slot]);
+
+	if (ok && loaded_libs[slot].stop_fun != NULL) {
+		void *stop_fun_irom = utils_drom_to_irom(loaded_libs[slot].stop_fun);
+		if (utils_is_func_valid(stop_fun_irom)) {
+			loaded_libs[slot].stop_fun = stop_fun_irom;
+			//commands_printf_lisp("=== LOAD SUCCESS ===");
+			return lbm_enc_sym(SYM_TRUE);
+		}
+		lbm_set_error_reason("Invalid stop function. Must be static.");
+	} else if (ok) {
+		lbm_set_error_reason("Library init failed - no stop function set");
+	} else {
 		lbm_set_error_reason("Library init failed");
+	}
+
+	// Rollback
+	loaded_libs[slot].stop_fun  = NULL;
+	loaded_libs[slot].base_addr = 0;
+	loaded_libs[slot].arg       = NULL;
+	lib_flash_addr[slot]        = 0;
+	if (lib_ram_alloc[slot]) {
+		heap_caps_free(lib_ram_alloc[slot]);
+		lib_ram_alloc[slot] = NULL;
 	}
 
 	return res;
@@ -815,13 +905,20 @@ lbm_value ext_unload_native_lib(lbm_value *args, lbm_uint argn) {
 
 	for (int i = 0; i < LIB_NUM_MAX; i++) {
 		if (loaded_libs[i].stop_fun != NULL
-			&& loaded_libs[i].base_addr == irom_base) {
+			&& lib_flash_addr[i] == irom_base) {
+			// The stop function must stop everything the lib started,
+			// including its threads, before returning.
 			if (utils_is_func_valid(loaded_libs[i].stop_fun)) {
 				loaded_libs[i].stop_fun(loaded_libs[i].arg);
 			}
 			loaded_libs[i].stop_fun  = NULL;
 			loaded_libs[i].base_addr = 0;
 			loaded_libs[i].arg       = NULL;
+			lib_flash_addr[i]        = 0;
+			if (lib_ram_alloc[i]) {
+				heap_caps_free(lib_ram_alloc[i]);
+				lib_ram_alloc[i] = NULL;
+			}
 
 			//commands_printf_lisp("Library at 0x%08X unloaded", irom_base);
 			return lbm_enc_sym(SYM_TRUE);

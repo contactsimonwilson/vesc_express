@@ -951,7 +951,8 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 								sizeof(magic_be)
 							);
 
-							if (magic_be == __builtin_bswap32(NATIVE_LIB_MAGIC)) {
+							if (magic_be == __builtin_bswap32(NATIVE_LIB_MAGIC) ||
+								magic_be == __builtin_bswap32(NATIVE_LIB_RELOC_MAGIC)) {
 								uint8_t *irom_base =
 									(uint8_t *)utils_drom_to_irom(code_data)
 									+ offset;

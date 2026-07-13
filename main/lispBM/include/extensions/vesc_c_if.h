@@ -26,6 +26,12 @@
 
 #define NATIVE_LIB_MAGIC 0xCAFEBABE
 
+// Container magic for relocatable libs that the firmware copies into RAM
+// and patches at load time. Used on targets that cannot run position-
+// independent code in place (ESP32-S3 / Xtensa). Layout: magic,
+// image_size, entry_offset, reloc_count, relocs[], image[].
+#define NATIVE_LIB_RELOC_MAGIC 0xCAFEBABF
+
 #if defined(ESP_PLATFORM) || defined(IS_VESC_LIB)
 typedef uint32_t systime_t;
 typedef enum {

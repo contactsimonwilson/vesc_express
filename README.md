@@ -59,7 +59,9 @@ idf.py build -DHW_NAME="VESC Express T"
 
 ### Native Libraries
 
-Native C libraries can be loaded at runtime with the `load-native-lib` LispBM extension. The library binary is included as an import in the Lisp code, executes in place from flash (XIP) and talks to the firmware through the interface table defined in `main/lispBM/include/extensions/vesc_c_if.h`.
+Native C libraries can be loaded at runtime with the `load-native-lib` LispBM extension. The library binary is included as an import in the Lisp code and talks to the firmware through the interface table defined in `main/lispBM/include/extensions/vesc_c_if.h`.
+
+On the RISC-V targets (C3, C6, P4) the library is position-independent and executes in place from flash (XIP), so writes to `.data`/`.bss` do not work there. On the ESP32-S3, Xtensa code cannot be position-independent, so the library is packaged with a relocation table (`mkreloc.py` in vesc_pkg), copied into RAM by the firmware and patched at load time - which also makes `.data`/`.bss` writable on that target. This requires `CONFIG_ESP_SYSTEM_MEMPROT_FEATURE=n` on the S3 (set in the default configs).
 
 The interface table lives at a fixed, target-specific address (the `.libif` section, placed by `main/linker_libif_<target>.ld`):
 
