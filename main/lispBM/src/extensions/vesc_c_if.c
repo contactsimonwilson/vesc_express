@@ -17,6 +17,7 @@
 #pragma GCC optimize("Os")
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "esp_heap_caps.h"
@@ -783,7 +784,15 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 	void *ram_alloc = NULL;
 
 	if (is_reloc) {
-#if CONFIG_IDF_TARGET_ESP32S3
+#if CONFIG_IDF_TARGET_ESP32S3 && CONFIG_ESP_SYSTEM_MEMPROT_FEATURE
+		// The exec-heap allocation below can never succeed with memory
+		// protection enabled, so fail with a message that says exactly
+		// what is wrong with this firmware build.
+		lbm_set_error_reason("This firmware was built with "
+			"CONFIG_ESP_SYSTEM_MEMPROT_FEATURE=y - native libs on the "
+			"ESP32-S3 need a build with it disabled");
+		return res;
+#elif CONFIG_IDF_TARGET_ESP32S3
 		// Xtensa cannot run position-independent code in place, so the
 		// container carries a relocation table and the image is copied to
 		// executable RAM and patched with its load address. Container
@@ -804,8 +813,13 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		uint8_t *img_iram = heap_caps_malloc(
 			image_size, MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL);
 		if (!img_iram) {
-			lbm_set_error_reason("Not enough executable memory for lib "
-				"(CONFIG_ESP_SYSTEM_MEMPROT_FEATURE must be disabled)");
+			static char err_buf[80];
+			snprintf(err_buf, sizeof(err_buf),
+				"Out of executable memory for lib: need %u, largest free %u",
+				(unsigned)image_size,
+				(unsigned)heap_caps_get_largest_free_block(
+					MALLOC_CAP_EXEC | MALLOC_CAP_INTERNAL));
+			lbm_set_error_reason(err_buf);
 			return res;
 		}
 		// The same RAM is byte-accessible through the DRAM alias.
