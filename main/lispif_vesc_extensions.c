@@ -164,6 +164,7 @@ typedef struct {
 	lbm_uint fw_ver;
 	lbm_uint uuid;
 	lbm_uint hw_type;
+	lbm_uint hw_target;
 	lbm_uint part_running;
 	lbm_uint git_branch;
 	lbm_uint git_hash;
@@ -300,6 +301,8 @@ static bool compare_symbol(lbm_uint sym, lbm_uint *comp) {
 			lbm_add_symbol_const("uuid", comp);
 		} else if (comp == &syms_vesc.hw_type) {
 			lbm_add_symbol_const("hw-type", comp);
+		} else if (comp == &syms_vesc.hw_target) {
+			lbm_add_symbol_const("hw-target", comp);
 		} else if (comp == &syms_vesc.part_running) {
 			lbm_add_symbol_const("part-running", comp);
 		} else if (comp == &syms_vesc.git_branch) {
@@ -1116,6 +1119,18 @@ static lbm_value ext_sysinfo(lbm_value *args, lbm_uint argn) {
 		res = lbm_cons(lbm_enc_i(FW_VERSION_MAJOR), res);
 	} else if (compare_symbol(name, &syms_vesc.hw_type)) {
 		res = lbm_enc_sym(sym_hw_express);
+	} else if (compare_symbol(name, &syms_vesc.hw_target)) {
+		// Chip this firmware runs on, e.g. "esp32c3". Native libs only run
+		// on the chip they were built for, so multi-target packages use
+		// this to pick the right binary.
+		lbm_value lbm_res;
+		if (lbm_create_array(&lbm_res, strlen(CONFIG_IDF_TARGET) + 1)) {
+			lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(lbm_res);
+			strcpy((char*)arr->data, CONFIG_IDF_TARGET);
+			res = lbm_res;
+		} else {
+			res = ENC_SYM_MERROR;
+		}
 	} else if (compare_symbol(name, &syms_vesc.part_running)) {
 		const esp_partition_t *running = esp_ota_get_running_partition();
 		if (running != NULL) {
