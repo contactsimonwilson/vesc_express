@@ -26,7 +26,7 @@
 
 void lispif_load_rgbled_extensions();
 
-bool rgbled_init(int pin);
+bool rgbled_init(int pin, unsigned int timing_preset);
 void rgbled_deinit();
 void rgbled_update(uint8_t * data, size_t size);
 

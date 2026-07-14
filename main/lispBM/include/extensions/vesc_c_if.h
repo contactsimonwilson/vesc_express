@@ -711,7 +711,10 @@ typedef struct {
 
 	#ifdef ESP_PLATFORM
 	// Functions below were added in firmware 7.00 and are VESC Express specific
-	bool (*rgbled_init)(int pin);
+
+	// timing_preset: 0 generic (covers WS2812B / WS2815 / SK6812 / SK6815),
+	// 1 WS2812B, 2 WS2815, 3 SK6812, 4 SK6815.
+	bool (*rgbled_init)(int pin, unsigned int timing_preset);
 	void (*rgbled_deinit)();
 	void (*rgbled_update)(uint8_t * data, size_t size);
 	int (*aes_ctr_crypt)(const uint8_t *key, size_t key_len,

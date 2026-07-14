@@ -285,8 +285,8 @@ static bool rgbled_init_core(int pin, unsigned int timing_preset, const char **e
 	return true;
 }
 
-bool rgbled_init(int pin) {
-	return rgbled_init_core(pin, 0, NULL);
+bool rgbled_init(int pin, unsigned int timing_preset) {
+	return rgbled_init_core(pin, timing_preset, NULL);
 }
 
 static lbm_value ext_rgbled_init(lbm_value *args, lbm_uint argn) {
