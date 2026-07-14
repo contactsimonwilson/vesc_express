@@ -754,7 +754,7 @@ typedef struct {
 #endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
-#define VESC_IF		((vesc_c_if*)(0x3FCCF800))
+#define VESC_IF		((vesc_c_if*)(0x3FCDBE00))
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
 #define VESC_IF		((vesc_c_if*)(0x3FCE8800))
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
