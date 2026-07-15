@@ -528,7 +528,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 		cif.cif.thread_set_priority = lib_thread_set_priority;
 
-		// RGB LED strip (appended interface slots)
+		// RGB LED strip
 		cif.cif.rgbled_init   = rgbled_init;
 		cif.cif.rgbled_deinit = rgbled_deinit;
 		cif.cif.rgbled_update = rgbled_update;
