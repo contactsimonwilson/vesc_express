@@ -33,6 +33,7 @@
 #include "extensions.h"
 #include "lbm_flat_value.h"
 #include "lispif.h"
+#include "lispif_rgbled_extensions.h"
 #include "lispbm.h"
 #include "utils.h"
 #include "extensions/vesc_c_if.h"
@@ -526,6 +527,11 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		cif.cif.sem_reset   = lib_sem_reset;
 
 		cif.cif.thread_set_priority = lib_thread_set_priority;
+
+		// RGB LED strip (appended interface slots)
+		cif.cif.rgbled_init   = rgbled_init;
+		cif.cif.rgbled_deinit = rgbled_deinit;
+		cif.cif.rgbled_update = rgbled_update;
 
 		lib_init_done = true;
 	}
