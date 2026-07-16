@@ -294,3 +294,55 @@ bool read_eeprom_var(eeprom_var *v, int address) {
 
 	return ok_op == ESP_OK && ok_set == ESP_OK;
 }
+
+bool store_eeprom_var_batch(eeprom_var *v, int base_addr, int count) {
+	if (base_addr < 0 || count < 0 || base_addr + count > EEPROM_VARS) {
+		return false;
+	}
+
+	nvs_handle_t my_handle;
+	if (nvs_open("lbm", NVS_READWRITE, &my_handle) != ESP_OK) {
+		return false;
+	}
+
+	bool ok = true;
+	char buf[10];
+	for (int i = 0; i < count; i++) {
+		sprintf(buf, "v%d", base_addr + i);
+		if (nvs_set_u32(my_handle, buf, v[i].as_u32) != ESP_OK) {
+			ok = false;
+			break;
+		}
+	}
+
+	if (ok && nvs_commit(my_handle) != ESP_OK) {
+		ok = false;
+	}
+
+	nvs_close(my_handle);
+	return ok;
+}
+
+bool read_eeprom_var_batch(eeprom_var *v, int base_addr, int count) {
+	if (base_addr < 0 || count < 0 || base_addr + count > EEPROM_VARS) {
+		return false;
+	}
+
+	nvs_handle_t my_handle;
+	if (nvs_open("lbm", NVS_READONLY, &my_handle) != ESP_OK) {
+		return false;
+	}
+
+	bool ok = true;
+	char buf[10];
+	for (int i = 0; i < count; i++) {
+		sprintf(buf, "v%d", base_addr + i);
+		if (nvs_get_u32(my_handle, buf, &v[i].as_u32) != ESP_OK) {
+			ok = false;
+			break;
+		}
+	}
+
+	nvs_close(my_handle);
+	return ok;
+}

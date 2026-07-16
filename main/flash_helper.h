@@ -54,5 +54,7 @@ typedef union {
 
 bool store_eeprom_var(eeprom_var *v, int address);
 bool read_eeprom_var(eeprom_var *v, int address);
+bool store_eeprom_var_batch(eeprom_var *v, int base_addr, int count);
+bool read_eeprom_var_batch(eeprom_var *v, int base_addr, int count);
 
 #endif /* FLASH_HELPER_H_ */

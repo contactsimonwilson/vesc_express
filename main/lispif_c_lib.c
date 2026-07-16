@@ -923,6 +923,14 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 
 		cif.cif.thread_set_priority = lib_thread_set_priority;
 
+		// Device / firmware identification
+		cif.cif.fw_version_major = lib_fw_version_major;
+		cif.cif.fw_version_minor = lib_fw_version_minor;
+		cif.cif.fw_version_test  = lib_fw_version_test;
+		cif.cif.hw_name          = lib_hw_name;
+		cif.cif.chip_name        = lib_chip_name;
+		cif.cif.get_mac          = lib_get_mac;
+
 		// CAN bus
 		cif.cif.can_transmit_sid = comm_can_transmit_sid;
 		cif.cif.can_transmit_eid = comm_can_transmit_eid;
@@ -986,6 +994,8 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		// Persistent storage
 		cif.cif.store_eeprom_var = store_eeprom_var;
 		cif.cif.read_eeprom_var  = read_eeprom_var;
+		cif.cif.store_eeprom_var_batch = store_eeprom_var_batch;
+		cif.cif.read_eeprom_var_batch  = read_eeprom_var_batch;
 
 		// Custom config (VESC Tool settings page)
 		cif.cif.conf_custom_add_config    = conf_custom_add_config_wrapper;
@@ -1043,6 +1053,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		cif.cif.mqtt_destroy           = comm_mqtt_destroy;
 		cif.cif.mqtt_set_event_handler = mqtt_set_event_handler_wrapper;
 
+#if !CONFIG_IDF_TARGET_ESP32P4
 		// ESP-NOW (via comm_espnow)
 		cif.cif.espnow_start          = comm_espnow_start;
 		cif.cif.espnow_add_peer       = comm_espnow_add_peer;
@@ -1050,9 +1061,7 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		cif.cif.espnow_send           = espnow_send_wrapper;
 		cif.cif.espnow_set_rx_callback = espnow_set_rx_callback_wrapper;
 
-		// BLE GATT server (via custom_ble). Not available on ESP32-P4, where
-		// the slots stay NULL.
-#if !CONFIG_IDF_TARGET_ESP32P4
+		// BLE GATT server (via custom_ble)
 		cif.cif.ble_start             = ble_start_wrapper;
 		cif.cif.ble_started           = custom_ble_started;
 		cif.cif.ble_set_name          = ble_set_name_wrapper;
@@ -1062,21 +1071,13 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		cif.cif.ble_attr_get_value    = ble_attr_get_value_wrapper;
 		cif.cif.ble_attr_set_value    = ble_attr_set_value_wrapper;
 		cif.cif.ble_set_write_callback = ble_set_write_callback_wrapper;
-#endif
 
 		// Standard BLE app link (comm_ble has P4 stubs, so no guard needed).
 		cif.cif.ble_app_connected         = comm_ble_is_connected;
 		cif.cif.ble_app_mtu               = comm_ble_mtu_now;
 		cif.cif.ble_app_set_conn_callback = ble_app_set_conn_callback_wrapper;
-
-		// Device / firmware identification
-		cif.cif.fw_version_major = lib_fw_version_major;
-		cif.cif.fw_version_minor = lib_fw_version_minor;
-		cif.cif.fw_version_test  = lib_fw_version_test;
-		cif.cif.hw_name          = lib_hw_name;
-		cif.cif.chip_name        = lib_chip_name;
-		cif.cif.get_mac          = lib_get_mac;
 		cif.cif.get_ble_mac      = lib_get_ble_mac;
+#endif
 
 		// RGB LED strip
 		cif.cif.rgbled_init   = rgbled_init;
