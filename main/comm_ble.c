@@ -57,6 +57,7 @@
 
 static bool is_connected = false;
 static uint16_t ble_current_mtu = DEFAULT_BLE_MTU;
+static void (*conn_cb)(bool connected) = NULL;
 
 static uint16_t notify_conn_id = 0;
 static esp_gatt_if_t notify_gatts_if;
@@ -592,9 +593,12 @@ static void gatts_event_handler(
 			}
 
 			gatts_profile.conn_id = param->connect.conn_id;
-			ble_current_mtu = DEFAULT_BLE_MTU; 
+			ble_current_mtu = DEFAULT_BLE_MTU;
 			is_connected = true;
 			LED_BLUE_ON();
+			if (conn_cb) {
+				conn_cb(true);
+			}
 
 			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL);
 			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL1, ESP_PWR_LVL);
@@ -607,6 +611,9 @@ static void gatts_event_handler(
 		case ESP_GATTS_DISCONNECT_EVT:
 			is_connected = false;
 			LED_BLUE_OFF();
+			if (conn_cb) {
+				conn_cb(false);
+			}
 			esp_ble_gap_start_advertising(&ble_adv_params);
 			break;
 
@@ -743,6 +750,10 @@ void comm_ble_send_packet(unsigned char *data, unsigned int len) {
 	packet_send_packet(data, len, packet_state);
 }
 
+void comm_ble_set_conn_callback(void (*cb)(bool connected)) {
+	conn_cb = cb;
+}
+
 #else
 
 void comm_ble_init(void) {}
@@ -758,6 +769,10 @@ int comm_ble_mtu_now(void) {
 void comm_ble_send_packet(unsigned char *data, unsigned int len) {
 	(void)data;
 	(void)len;
+}
+
+void comm_ble_set_conn_callback(void (*cb)(bool connected)) {
+	(void)cb;
 }
 
 #endif

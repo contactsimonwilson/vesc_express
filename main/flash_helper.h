@@ -44,4 +44,15 @@ uint32_t flash_helper_code_size(int ind);
 uint16_t flash_helper_code_flags(int ind);
 flast_stats flash_helper_stats(void);
 
+// Persistent key/value store (NVS "lbm" namespace, addresses 0..255), shared
+// with the lisp eeprom-store/-read extensions.
+typedef union {
+	uint32_t as_u32;
+	int32_t as_i32;
+	float as_float;
+} eeprom_var;
+
+bool store_eeprom_var(eeprom_var *v, int address);
+bool read_eeprom_var(eeprom_var *v, int address);
+
 #endif /* FLASH_HELPER_H_ */

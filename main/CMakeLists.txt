@@ -9,9 +9,12 @@ set(COMPONENT_SRCS
 "comm_can.c"
 "comm_ble.c"
 "comm_wifi.c"
+"comm_mqtt.c"
+"comm_espnow.c"
 "packet.c"
 "crc.c"
 "commands.c"
+"conf_custom.c"
 "terminal.c"
 "mempools.c"
 "log.c"
@@ -66,6 +69,7 @@ set(COMPONENT_SRCS
 "lispBM/src/extensions/ttf_backend.c"
 
 "wifi/lispif_wifi_extensions.c"
+"wifi/lispif_mqtt_extensions.c"
 
 "ble/custom_ble.c"
 

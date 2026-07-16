@@ -29,7 +29,23 @@
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
 #include "heap_memory_layout.h"
+#include "driver/gpio.h"
 #include "commands.h"
+#include "comm_can.h"
+#include "comm_wifi.h"
+#include "conf_custom.h"
+#include "flash_helper.h"
+#include "imu.h"
+#include "ahrs.h"
+#include "nmea.h"
+#include "bms.h"
+#include "comm_mqtt.h"
+#include "comm_espnow.h"
+#include "comm_ble.h"
+#include "custom_ble.h"
+#include "conf_general.h"
+#include "esp_mac.h"
+#include "buffer.h"
 #include "extensions.h"
 #include "lbm_flat_value.h"
 #include "lispif.h"
@@ -403,6 +419,385 @@ void lispif_stop_lib(void) {
 	}
 }
 
+// The RX callback / app-data handler pointers come from the native lib, whose
+// code is reached through the flash instruction bus (IROM). Translate the
+// DROM-side pointer the lib hands us to its IROM alias before the firmware
+// stores and later calls it.
+static void can_set_sid_rx_callback_wrapper(bool (*p_func)(uint32_t id, uint8_t *data, uint8_t len)) {
+	bool (*p_func_irom)(uint32_t, uint8_t *, uint8_t) = utils_drom_to_irom(p_func);
+	comm_can_set_sid_rx_callback(p_func_irom);
+}
+
+static void can_set_eid_rx_callback_wrapper(bool (*p_func)(uint32_t id, uint8_t *data, uint8_t len)) {
+	bool (*p_func_irom)(uint32_t, uint8_t *, uint8_t) = utils_drom_to_irom(p_func);
+	comm_can_set_eid_rx_callback(p_func_irom);
+}
+
+static bool set_app_data_handler_wrapper(void (*func)(unsigned char *data, unsigned int len)) {
+	void (*func_irom)(unsigned char *, unsigned int) = utils_drom_to_irom(func);
+	return commands_set_app_data_handler(func_irom);
+}
+
+// Standard BLE link connect/disconnect callback comes from the lib; translate
+// to its IROM alias before comm_ble stores and later calls it.
+static void ble_app_set_conn_callback_wrapper(void (*cb)(bool connected)) {
+	void (*cb_irom)(bool) = utils_drom_to_irom((void *)cb);
+	comm_ble_set_conn_callback(cb_irom);
+}
+
+// Device / firmware identification.
+static int lib_fw_version_major(void) { return FW_VERSION_MAJOR; }
+static int lib_fw_version_minor(void) { return FW_VERSION_MINOR; }
+static int lib_fw_version_test(void)  { return FW_TEST_VERSION_NUMBER; }
+static const char *lib_hw_name(void)  { return HW_NAME; }
+static const char *lib_chip_name(void) { return CONFIG_IDF_TARGET; }
+
+static void lib_get_mac(uint8_t *buf) {
+	if (buf) {
+		esp_read_mac(buf, ESP_MAC_WIFI_STA);
+	}
+}
+
+static void lib_get_ble_mac(uint8_t *buf) {
+	if (buf) {
+		esp_read_mac(buf, ESP_MAC_BT);
+	}
+}
+
+static void imu_set_read_callback_wrapper(void (*func)(float *acc, float *gyro, float *mag, float dt)) {
+	void (*func_irom)(float *, float *, float *, float) = utils_drom_to_irom(func);
+	imu_set_read_callback(func_irom);
+}
+
+// Custom config registration takes three lib callbacks; translate each to its
+// IROM alias before the firmware stores and later calls them.
+static void conf_custom_add_config_wrapper(
+		int (*get_cfg)(uint8_t *data, bool is_default),
+		bool (*set_cfg)(uint8_t *data), int (*get_cfg_xml)(uint8_t **data)) {
+	int (*get_cfg_irom)(uint8_t *, bool) = utils_drom_to_irom(get_cfg);
+	bool (*set_cfg_irom)(uint8_t *)      = utils_drom_to_irom(set_cfg);
+	int (*get_cfg_xml_irom)(uint8_t **)  = utils_drom_to_irom(get_cfg_xml);
+	conf_custom_add_config(get_cfg_irom, set_cfg_irom, get_cfg_xml_irom);
+}
+
+// Set remote nunchuk/joystick + button state on a motor controller over CAN.
+// Encodes a COMM_SET_CHUCK_DATA packet and forwards it (send=0: process, no
+// reply). js_x/js_y are 0..255 (128 = centre); acc_* are raw int16 counts.
+static void can_set_chuck_data_wrapper(uint8_t controller_id, int js_x, int js_y,
+		bool bt_c, bool bt_z, int acc_x, int acc_y, int acc_z) {
+	uint8_t buf[11];
+	int32_t ind = 0;
+	buf[ind++] = COMM_SET_CHUCK_DATA;
+	buf[ind++] = (uint8_t)js_x;
+	buf[ind++] = (uint8_t)js_y;
+	buf[ind++] = bt_c ? 1 : 0;
+	buf[ind++] = bt_z ? 1 : 0;
+	buffer_append_int16(buf, (int16_t)acc_x, &ind);
+	buffer_append_int16(buf, (int16_t)acc_y, &ind);
+	buffer_append_int16(buf, (int16_t)acc_z, &ind);
+	comm_can_send_buffer(controller_id, buf, ind, 0);
+}
+
+// ---- MQTT ------------------------------------------------------------------
+// Backed by comm_mqtt, which owns all esp-mqtt access. Only two adapters are
+// needed here: config translation (mqtt_config -> comm_mqtt_cfg) and an event
+// shim that repacks comm_mqtt_event into the lib-facing mqtt_event and calls
+// the lib callback. The lib callback is carried as comm_mqtt's per-client user
+// pointer, so no separate table is needed. The rest of the mqtt_* slots map
+// straight onto comm_mqtt_* (identical signatures) and are wired directly.
+
+// comm_mqtt_event and mqtt_event have the same fields; repack and forward to
+// the lib callback (passed as user, already translated to its IROM alias).
+static void mqtt_native_cb(void *client, const comm_mqtt_event *ev, void *user) {
+	void (*lib_cb)(void *, const mqtt_event *) = user;
+	if (!lib_cb) {
+		return;
+	}
+	mqtt_event out = {0};
+	out.event_id       = ev->event_id;
+	out.topic          = ev->topic;
+	out.topic_len      = ev->topic_len;
+	out.data           = ev->data;
+	out.data_len       = ev->data_len;
+	out.data_offset    = ev->data_offset;
+	out.total_data_len = ev->total_data_len;
+	out.msg_id         = ev->msg_id;
+	out.qos            = ev->qos;
+	out.retain         = ev->retain;
+	lib_cb(client, &out);
+}
+
+static void *mqtt_init_wrapper(const mqtt_config *cfg) {
+	if (!cfg) {
+		return NULL;
+	}
+	comm_mqtt_cfg c = {
+		.uri             = cfg->uri,
+		.host            = cfg->host,
+		.port            = cfg->port,
+		.client_id       = cfg->client_id,
+		.username        = cfg->username,
+		.password        = cfg->password,
+		.keepalive       = cfg->keepalive,
+		.lwt_topic       = cfg->lwt_topic,
+		.lwt_msg         = cfg->lwt_msg,
+		.lwt_qos         = cfg->lwt_qos,
+		.lwt_retain      = cfg->lwt_retain,
+		.server_cert_pem = cfg->server_cert_pem,
+	};
+	return comm_mqtt_create(&c);
+}
+
+static void mqtt_set_event_handler_wrapper(void *client,
+		void (*cb)(void *client, const mqtt_event *ev)) {
+	void *cb_irom = utils_drom_to_irom((void *)cb);
+	comm_mqtt_set_cb(client, mqtt_native_cb, cb_irom);
+}
+
+// ---- ESP-NOW ---------------------------------------------------------------
+// Backed by comm_espnow. A single native listener forwards received frames to
+// the lib's rx callback (stored IROM-translated); start/add_peer/del_peer map
+// straight onto comm_espnow_*, send needs an int->size_t adapter.
+static void (*s_espnow_lib_rx)(const uint8_t *src, const uint8_t *data,
+		int len, int rssi) = NULL;
+static int s_espnow_listener = -1;
+
+static void espnow_native_recv(const uint8_t *src, const uint8_t *des,
+		const uint8_t *data, int len, int rssi, void *user) {
+	(void)des;
+	(void)user;
+	void (*cb)(const uint8_t *, const uint8_t *, int, int) = s_espnow_lib_rx;
+	if (cb) {
+		cb(src, data, len, rssi);
+	}
+}
+
+static void espnow_set_rx_callback_wrapper(
+		void (*cb)(const uint8_t *src, const uint8_t *data, int len, int rssi)) {
+	s_espnow_lib_rx = utils_drom_to_irom((void *)cb);
+	if (s_espnow_listener < 0) {
+		s_espnow_listener =
+			comm_espnow_add_listener(espnow_native_recv, NULL, NULL);
+	}
+}
+
+static int espnow_send_wrapper(const uint8_t *mac, const uint8_t *data, int len) {
+	return comm_espnow_send(mac, data, (size_t)len);
+}
+
+// ---- BLE GATT server (via custom_ble) --------------------------------------
+#if !CONFIG_IDF_TARGET_ESP32P4
+
+// custom_ble_add_service reports the created handles through a callback that
+// carries no user pointer, and blocks until it has fired. Serialize via this
+// static capture (the underlying API is single-thread-only anyway).
+typedef struct { uint16_t *out; int cap; int count; } ble_handles_cap_t;
+static ble_handles_cap_t *s_ble_cap = NULL;
+
+static void ble_handles_trampoline(uint16_t count, const uint16_t handles[]) {
+	if (!s_ble_cap) {
+		return;
+	}
+	int n = (int)count;
+	if (n > s_ble_cap->cap) {
+		n = s_ble_cap->cap;
+	}
+	for (int i = 0; i < n; i++) {
+		s_ble_cap->out[i] = handles[i];
+	}
+	s_ble_cap->count = (int)count;
+}
+
+static esp_bt_uuid_t ble_to_esp_uuid(const ble_uuid *u) {
+	esp_bt_uuid_t e;
+	memset(&e, 0, sizeof(e));
+	e.len = u->len;
+	if (u->len == ESP_UUID_LEN_16) {
+		memcpy(&e.uuid.uuid16, u->uuid, 2);
+	} else if (u->len == ESP_UUID_LEN_32) {
+		memcpy(&e.uuid.uuid32, u->uuid, 4);
+	} else {
+		memcpy(e.uuid.uuid128, u->uuid, 16);
+	}
+	return e;
+}
+
+static bool ble_start_wrapper(void) {
+	custom_ble_result_t r = custom_ble_start();
+	return r == CUSTOM_BLE_OK || r == CUSTOM_BLE_ALREADY_STARTED;
+}
+
+static bool ble_set_name_wrapper(const char *name) {
+	return custom_ble_set_name(name) == CUSTOM_BLE_OK;
+}
+
+static bool ble_update_adv_wrapper(bool use_raw, const uint8_t *adv,
+		int adv_len, const uint8_t *scan_rsp, int scan_rsp_len) {
+	return custom_ble_update_adv(use_raw, (size_t)adv_len, adv,
+			(size_t)scan_rsp_len, scan_rsp) == CUSTOM_BLE_OK;
+}
+
+static int ble_add_service_wrapper(const ble_uuid *uuid,
+		const ble_chr_def *chrs, int chr_count, uint16_t *handles,
+		int handles_cap) {
+	if (!uuid || (chr_count > 0 && !chrs)) {
+		return -1;
+	}
+
+	ble_chr_definition_t *ec = NULL;
+	if (chr_count > 0) {
+		ec = calloc(chr_count, sizeof(ble_chr_definition_t));
+		if (!ec) {
+			return -1;
+		}
+		for (int i = 0; i < chr_count; i++) {
+			ec[i].uuid          = ble_to_esp_uuid(&chrs[i].uuid);
+			ec[i].perm          = chrs[i].perm;
+			ec[i].property      = chrs[i].prop;
+			ec[i].value_max_len = chrs[i].max_len;
+			ec[i].value_len     = chrs[i].init_len;
+			ec[i].value         = (uint8_t *)chrs[i].init;
+			ec[i].descr_count   = chrs[i].descr_count;
+			ec[i].descriptors   = NULL;
+			if (chrs[i].descr_count > 0 && chrs[i].descrs) {
+				ble_desc_definition_t *dd =
+					calloc(chrs[i].descr_count, sizeof(ble_desc_definition_t));
+				if (!dd) {
+					for (int k = 0; k < i; k++) {
+						free((void *)ec[k].descriptors);
+					}
+					free(ec);
+					return -1;
+				}
+				for (int j = 0; j < chrs[i].descr_count; j++) {
+					dd[j].uuid          = ble_to_esp_uuid(&chrs[i].descrs[j].uuid);
+					dd[j].perm          = chrs[i].descrs[j].perm;
+					dd[j].value_max_len = chrs[i].descrs[j].max_len;
+					dd[j].value_len     = chrs[i].descrs[j].init_len;
+					dd[j].value         = (uint8_t *)chrs[i].descrs[j].init;
+				}
+				ec[i].descriptors = dd;
+			}
+		}
+	}
+
+	ble_handles_cap_t cap = { handles, handles_cap, 0 };
+	s_ble_cap = &cap;
+	custom_ble_result_t res = custom_ble_add_service(
+			ble_to_esp_uuid(uuid), (uint16_t)chr_count, ec,
+			ble_handles_trampoline);
+	s_ble_cap = NULL;
+
+	if (ec) {
+		for (int i = 0; i < chr_count; i++) {
+			free((void *)ec[i].descriptors);
+		}
+		free(ec);
+	}
+
+	return (res == CUSTOM_BLE_OK) ? cap.count : -1;
+}
+
+static bool ble_remove_service_wrapper(uint16_t service_handle) {
+	return custom_ble_remove_service(service_handle) == CUSTOM_BLE_OK;
+}
+
+static int ble_attr_get_value_wrapper(uint16_t handle, uint8_t *out,
+		int out_cap) {
+	uint16_t len = 0;
+	const uint8_t *val = NULL;
+	if (custom_ble_get_attr_value(handle, &len, &val) != CUSTOM_BLE_OK || !val) {
+		return -1;
+	}
+	int n = (int)len;
+	if (n > out_cap) {
+		n = out_cap;
+	}
+	if (out && n > 0) {
+		memcpy(out, val, n);
+	}
+	return (int)len; // full length, even if truncated into out
+}
+
+static bool ble_attr_set_value_wrapper(uint16_t handle, const uint8_t *data,
+		int len) {
+	return custom_ble_set_attr_value(handle, (uint16_t)len, data)
+			== CUSTOM_BLE_OK;
+}
+
+// The lib's write callback, carried IROM-translated. One custom_ble write
+// listener forwards to it.
+static void (*s_ble_lib_write)(uint16_t handle, const uint8_t *data, int len)
+		= NULL;
+static int s_ble_write_listener = -1;
+
+static void ble_native_write(uint16_t attr_handle, uint16_t len,
+		uint8_t *value, void *user) {
+	(void)user;
+	void (*cb)(uint16_t, const uint8_t *, int) = s_ble_lib_write;
+	if (cb) {
+		cb(attr_handle, value, (int)len);
+	}
+}
+
+static void ble_set_write_callback_wrapper(
+		void (*cb)(uint16_t handle, const uint8_t *data, int len)) {
+	s_ble_lib_write = utils_drom_to_irom((void *)cb);
+	if (s_ble_write_listener < 0) {
+		s_ble_write_listener =
+			custom_ble_add_write_listener(ble_native_write, NULL);
+	}
+}
+
+#endif // !CONFIG_IDF_TARGET_ESP32P4
+
+// GPIO helpers. mode: 0=input, 1=input/output, 2=open-drain. pull: 0=none,
+// 1=up, 2=down. Guarded by utils_gpio_is_valid so a bad pin is a no-op.
+static void gpio_configure_wrapper(int pin, int mode, int pull) {
+	if (!utils_gpio_is_valid(pin)) {
+		return;
+	}
+	gpio_config_t c = {0};
+	c.pin_bit_mask = 1ULL << pin;
+	c.intr_type    = GPIO_INTR_DISABLE;
+	switch (mode) {
+		case 0:  c.mode = GPIO_MODE_INPUT; break;
+		case 2:  c.mode = GPIO_MODE_INPUT_OUTPUT_OD; break;
+		case 1:  c.mode = GPIO_MODE_INPUT_OUTPUT; break;
+		default: c.mode = GPIO_MODE_DISABLE; break;
+	}
+	c.pull_up_en   = (pull == 1) ? GPIO_PULLUP_ENABLE   : GPIO_PULLUP_DISABLE;
+	c.pull_down_en = (pull == 2) ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE;
+	gpio_reset_pin(pin);
+	gpio_config(&c);
+}
+
+static void gpio_write_wrapper(int pin, bool state) {
+	if (utils_gpio_is_valid(pin)) {
+		gpio_set_level(pin, state ? 1 : 0);
+	}
+}
+
+static bool gpio_read_wrapper(int pin) {
+	if (!utils_gpio_is_valid(pin)) {
+		return false;
+	}
+	return gpio_get_level(pin) != 0;
+}
+
+// I2C combined transaction. Returns the esp_err_t as an int (0 == ESP_OK).
+static int i2c_tx_rx_wrapper(uint8_t addr, const uint8_t *write, size_t wlen,
+		uint8_t *read, size_t rlen) {
+	return (int)lispif_i2c_tx_rx(addr, write, wlen, read, rlen);
+}
+
+// BMS command handler is called by the firmware, so translate the lib's
+// pointer to its IROM alias first. cmd is a COMM_PACKET_ID (== int on ABI).
+static void bms_set_cmd_handler_wrapper(void (*handler)(int cmd, int param1, int param2)) {
+	void (*handler_irom)(COMM_PACKET_ID, int, int) = utils_drom_to_irom(handler);
+	bms_register_cmd_handler(handler_irom);
+}
+
 lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 	lbm_value res = lbm_enc_sym(SYM_EERROR);
 
@@ -527,6 +922,161 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		cif.cif.sem_reset   = lib_sem_reset;
 
 		cif.cif.thread_set_priority = lib_thread_set_priority;
+
+		// CAN bus
+		cif.cif.can_transmit_sid = comm_can_transmit_sid;
+		cif.cif.can_transmit_eid = comm_can_transmit_eid;
+		cif.cif.can_send_buffer  = comm_can_send_buffer;
+		cif.cif.can_set_sid_rx_callback = can_set_sid_rx_callback_wrapper;
+		cif.cif.can_set_eid_rx_callback = can_set_eid_rx_callback_wrapper;
+		cif.cif.can_set_duty     = comm_can_set_duty;
+		cif.cif.can_set_current  = comm_can_set_current;
+		cif.cif.can_set_current_off_delay = comm_can_set_current_off_delay;
+		cif.cif.can_set_current_brake     = comm_can_set_current_brake;
+		cif.cif.can_set_rpm      = comm_can_set_rpm;
+		cif.cif.can_set_pos      = comm_can_set_pos;
+		cif.cif.can_set_current_rel = comm_can_set_current_rel;
+		cif.cif.can_set_current_rel_off_delay = comm_can_set_current_rel_off_delay;
+		cif.cif.can_set_current_brake_rel = comm_can_set_current_brake_rel;
+		cif.cif.can_ping         = comm_can_ping;
+		cif.cif.can_get_status_msg_index   = comm_can_get_status_msg_index;
+		cif.cif.can_get_status_msg_id      = comm_can_get_status_msg_id;
+		cif.cif.can_get_status_msg_2_index = comm_can_get_status_msg_2_index;
+		cif.cif.can_get_status_msg_2_id    = comm_can_get_status_msg_2_id;
+		cif.cif.can_get_status_msg_3_index = comm_can_get_status_msg_3_index;
+		cif.cif.can_get_status_msg_3_id    = comm_can_get_status_msg_3_id;
+		cif.cif.can_get_status_msg_4_index = comm_can_get_status_msg_4_index;
+		cif.cif.can_get_status_msg_4_id    = comm_can_get_status_msg_4_id;
+		cif.cif.can_get_status_msg_5_index = comm_can_get_status_msg_5_index;
+		cif.cif.can_get_status_msg_5_id    = comm_can_get_status_msg_5_id;
+		cif.cif.can_get_status_msg_6_index = comm_can_get_status_msg_6_index;
+		cif.cif.can_get_status_msg_6_id    = comm_can_get_status_msg_6_id;
+
+		// App comms
+		cif.cif.send_app_data        = commands_send_app_data;
+		cif.cif.set_app_data_handler = set_app_data_handler_wrapper;
+
+		// IMU
+		cif.cif.imu_startup_done       = imu_startup_done;
+		cif.cif.imu_get_roll           = imu_get_roll;
+		cif.cif.imu_get_pitch          = imu_get_pitch;
+		cif.cif.imu_get_yaw            = imu_get_yaw;
+		cif.cif.imu_get_rpy            = imu_get_rpy;
+		cif.cif.imu_get_accel          = imu_get_accel;
+		cif.cif.imu_get_gyro           = imu_get_gyro;
+		cif.cif.imu_get_mag            = imu_get_mag;
+		cif.cif.imu_derotate           = imu_derotate;
+		cif.cif.imu_get_accel_derotated = imu_get_accel_derotated;
+		cif.cif.imu_get_gyro_derotated  = imu_get_gyro_derotated;
+		cif.cif.imu_get_quaternions    = imu_get_quaternions;
+		cif.cif.imu_get_calibration    = imu_get_calibration;
+		cif.cif.imu_set_read_callback  = imu_set_read_callback_wrapper;
+
+		// AHRS
+		cif.cif.ahrs_init_attitude_info      = ahrs_init_attitude_info;
+		cif.cif.ahrs_update_all_parameters   = ahrs_update_all_parameters;
+		cif.cif.ahrs_update_initial_orientation = ahrs_update_initial_orientation;
+		cif.cif.ahrs_update_mahony_imu       = ahrs_update_mahony_imu;
+		cif.cif.ahrs_update_madgwick_imu     = ahrs_update_madgwick_imu;
+		cif.cif.ahrs_get_roll                = ahrs_get_roll;
+		cif.cif.ahrs_get_pitch               = ahrs_get_pitch;
+		cif.cif.ahrs_get_yaw                 = ahrs_get_yaw;
+		cif.cif.ahrs_get_roll_pitch_yaw      = ahrs_get_roll_pitch_yaw;
+
+		// Persistent storage
+		cif.cif.store_eeprom_var = store_eeprom_var;
+		cif.cif.read_eeprom_var  = read_eeprom_var;
+
+		// Custom config (VESC Tool settings page)
+		cif.cif.conf_custom_add_config    = conf_custom_add_config_wrapper;
+		cif.cif.conf_custom_clear_configs = conf_custom_clear_configs;
+
+		// Wi-Fi
+		cif.cif.wifi_is_connected        = comm_wifi_is_connected;
+		cif.cif.wifi_is_client_connected = comm_wifi_is_client_connected;
+		cif.cif.wifi_is_connecting       = comm_wifi_is_connecting;
+		cif.cif.wifi_disconnect          = comm_wifi_disconnect;
+		cif.cif.wifi_change_network      = comm_wifi_change_network;
+		cif.cif.wifi_reconnect_network   = comm_wifi_reconnect_network;
+		cif.cif.wifi_disconnect_network  = comm_wifi_disconnect_network;
+		cif.cif.wifi_set_auto_reconnect  = comm_wifi_set_auto_reconnect;
+		cif.cif.wifi_get_auto_reconnect  = comm_wifi_get_auto_reconnect;
+
+		// CAN: more remote-device commands
+		cif.cif.can_set_handbrake     = comm_can_set_handbrake;
+		cif.cif.can_set_handbrake_rel = comm_can_set_handbrake_rel;
+		cif.cif.can_io_board_set_output_digital = comm_can_io_board_set_output_digital;
+		cif.cif.can_io_board_set_output_pwm     = comm_can_io_board_set_output_pwm;
+		cif.cif.can_psw_switch            = comm_can_psw_switch;
+		cif.cif.can_update_pid_pos_offset = comm_can_update_pid_pos_offset;
+		cif.cif.can_set_chuck_data        = can_set_chuck_data_wrapper;
+
+		// GPIO
+		cif.cif.gpio_configure = gpio_configure_wrapper;
+		cif.cif.gpio_write     = gpio_write_wrapper;
+		cif.cif.gpio_read      = gpio_read_wrapper;
+
+		// I2C
+		cif.cif.i2c_tx_rx = i2c_tx_rx_wrapper;
+
+		// GNSS
+		cif.cif.gnss_get_state = nmea_get_state;
+		cif.cif.gnss_fix_type  = nmea_fix_type;
+
+		// BMS
+		cif.cif.bms_get_values      = bms_get_values;
+		cif.cif.bms_send_status_can = bms_send_status_can;
+		cif.cif.bms_set_cmd_handler = bms_set_cmd_handler_wrapper;
+
+		// Wi-Fi raw send
+		cif.cif.wifi_send_raw_local = comm_wifi_send_raw_local;
+		cif.cif.wifi_send_raw_hub   = comm_wifi_send_raw_hub;
+
+		// MQTT (via comm_mqtt). Direct-signature slots map straight onto
+		// comm_mqtt_*; init/set_event_handler need small adapters.
+		cif.cif.mqtt_init              = mqtt_init_wrapper;
+		cif.cif.mqtt_start             = comm_mqtt_start;
+		cif.cif.mqtt_stop              = comm_mqtt_stop;
+		cif.cif.mqtt_publish           = comm_mqtt_publish;
+		cif.cif.mqtt_subscribe         = comm_mqtt_subscribe;
+		cif.cif.mqtt_unsubscribe       = comm_mqtt_unsubscribe;
+		cif.cif.mqtt_destroy           = comm_mqtt_destroy;
+		cif.cif.mqtt_set_event_handler = mqtt_set_event_handler_wrapper;
+
+		// ESP-NOW (via comm_espnow)
+		cif.cif.espnow_start          = comm_espnow_start;
+		cif.cif.espnow_add_peer       = comm_espnow_add_peer;
+		cif.cif.espnow_del_peer       = comm_espnow_del_peer;
+		cif.cif.espnow_send           = espnow_send_wrapper;
+		cif.cif.espnow_set_rx_callback = espnow_set_rx_callback_wrapper;
+
+		// BLE GATT server (via custom_ble). Not available on ESP32-P4, where
+		// the slots stay NULL.
+#if !CONFIG_IDF_TARGET_ESP32P4
+		cif.cif.ble_start             = ble_start_wrapper;
+		cif.cif.ble_started           = custom_ble_started;
+		cif.cif.ble_set_name          = ble_set_name_wrapper;
+		cif.cif.ble_update_adv        = ble_update_adv_wrapper;
+		cif.cif.ble_add_service       = ble_add_service_wrapper;
+		cif.cif.ble_remove_service    = ble_remove_service_wrapper;
+		cif.cif.ble_attr_get_value    = ble_attr_get_value_wrapper;
+		cif.cif.ble_attr_set_value    = ble_attr_set_value_wrapper;
+		cif.cif.ble_set_write_callback = ble_set_write_callback_wrapper;
+#endif
+
+		// Standard BLE app link (comm_ble has P4 stubs, so no guard needed).
+		cif.cif.ble_app_connected         = comm_ble_is_connected;
+		cif.cif.ble_app_mtu               = comm_ble_mtu_now;
+		cif.cif.ble_app_set_conn_callback = ble_app_set_conn_callback_wrapper;
+
+		// Device / firmware identification
+		cif.cif.fw_version_major = lib_fw_version_major;
+		cif.cif.fw_version_minor = lib_fw_version_minor;
+		cif.cif.fw_version_test  = lib_fw_version_test;
+		cif.cif.hw_name          = lib_hw_name;
+		cif.cif.chip_name        = lib_chip_name;
+		cif.cif.get_mac          = lib_get_mac;
+		cif.cif.get_ble_mac      = lib_get_ble_mac;
 
 		// RGB LED strip
 		cif.cif.rgbled_init   = rgbled_init;

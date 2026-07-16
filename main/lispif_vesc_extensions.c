@@ -39,6 +39,8 @@
 #include "lispif_disp_extensions.h"
 #include "lispif_touch_extensions.h"
 #include "lispif_wifi_extensions.h"
+#include "lispif_mqtt_extensions.h"
+#include "comm_espnow.h"
 #include "lispif_ble_extensions.h"
 #include "lispif_rgbled_extensions.h"
 #include "lbm_color_extensions.h"
@@ -1012,11 +1014,11 @@ typedef union {
 	float as_float;
 } eeprom_var;
 
-#define EEPROM_VARS		256
+#define EEPROM_VARS		512
 
 static bool check_eeprom_addr(int addr) {
 	if (addr < 0 || addr >= EEPROM_VARS) {
-		lbm_set_error_reason("Address must be 0 to 255");
+		lbm_set_error_reason("Address must be 0 to 511");
 		return false;
 	}
 
@@ -2151,6 +2153,12 @@ static lbm_value ext_enable_event(lbm_value *args, lbm_uint argn) {
 		event_bms_force_bal_en = en;
 	} else if (name == sym_bms_zero_ofs) {
 		event_bms_zero_ofs_en = en;
+	} else if (name == sym_event_mqtt_connected) {
+		event_mqtt_connected_en = en;
+	} else if (name == sym_event_mqtt_disconnected) {
+		event_mqtt_disconnected_en = en;
+	} else if (name == sym_event_mqtt_rx) {
+		event_mqtt_rx_en = en;
 	} else {
 		return ENC_SYM_EERROR;
 	}
@@ -2319,169 +2327,90 @@ static lbm_value ext_ioboard_set_pwm(lbm_value *args, lbm_uint argn) {
 
 #if !CONFIG_IDF_TARGET_ESP32P4
 
-static bool esp_now_initialized = false;
 static volatile lbm_cid esp_now_send_cid = -1;
 static volatile lbm_cid esp_now_recv_cid = -1;
 static char *esp_init_msg = "ESP-NOW not initialized";
+static bool esp_now_listener_added = false;
 
-typedef struct {
-	uint8_t *data;
-	int len;
-	uint8_t src[6];
-	uint8_t des[6];
-	int rssi;
-} esp_now_send_data;
-
-#define ESP_NOW_RX_BUFFER_ELEMENTS		10
-static rb_t esp_now_rx_rb;
-static esp_now_send_data esp_now_rx_data[ESP_NOW_RX_BUFFER_ELEMENTS];
-static SemaphoreHandle_t esp_now_rx_sem;
-
-static void esp_rx_fun(void *arg) {
-	(void)arg;
-
-	for (;;) {
-		xSemaphoreTake(esp_now_rx_sem, 10 / portTICK_PERIOD_MS);
-
-		esp_now_send_data data;
-		if (!rb_pop(&esp_now_rx_rb, &data)) {
-			continue;
-		}
-
-		lbm_flat_value_t v;
-		if (start_flatten_with_gc(&v, 150 + data.len)) {
-			if (esp_now_recv_cid < 0) {
-				f_cons(&v);
-				f_sym(&v, sym_event_esp_now_rx);
-			}
-
-			f_cons(&v);
-			for (int i = 0; i < 6; i++) {
-				f_cons(&v);
-				f_i(&v, data.src[i]);
-			}
-			f_sym(&v, SYM_NIL);
-
-			f_cons(&v);
-			for (int i = 0; i < 6; i++) {
-				f_cons(&v);
-				f_i(&v, data.des[i]);
-			}
-			f_sym(&v, SYM_NIL);
-
-			f_cons(&v);
-			f_lbm_array(&v, data.len, data.data);
-
-			f_cons(&v);
-			f_i(&v, data.rssi);
-
-			f_sym(&v, SYM_NIL);
-
-			lbm_finish_flatten(&v);
-
-			if (esp_now_recv_cid >= 0) {
-				if (!lbm_unblock_ctx(esp_now_recv_cid, &v)) {
-					lbm_free(v.buf);
-				}
-			} else {
-				if (!lbm_event(&v)) {
-					lbm_free(v.buf);
-				}
-			}
-		}
-
-		free(data.data);
+// Called from comm_espnow's dispatch task for each received frame. Delivers to
+// a blocked (esp-now-recv) context if any, otherwise fires event-esp-now-rx.
+static void lisp_espnow_recv(const uint8_t *src, const uint8_t *des,
+		const uint8_t *data, int len, int rssi, void *user) {
+	(void)user;
+	if (!event_esp_now_rx_en && esp_now_recv_cid < 0) {
+		return;
 	}
-}
 
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 0)
-static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
-#else
-static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status) {
-#endif
-	lbm_unblock_ctx_unboxed(esp_now_send_cid, status == ESP_NOW_SEND_SUCCESS ? ENC_SYM_TRUE : ENC_SYM_NIL);
-}
-
-static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len) {
-	if (event_esp_now_rx_en || esp_now_recv_cid >= 0) {
-		esp_now_send_data sdata;
-
-		sdata.data = malloc(data_len);
-		if (!sdata.data) {
-			return;
+	lbm_flat_value_t v;
+	if (start_flatten_with_gc(&v, 150 + len)) {
+		if (esp_now_recv_cid < 0) {
+			f_cons(&v);
+			f_sym(&v, sym_event_esp_now_rx);
 		}
 
-		sdata.len = data_len;
-		memcpy(sdata.data, data, data_len);
-		memcpy(sdata.src, esp_now_info->src_addr, 6);
-		memcpy(sdata.des, esp_now_info->des_addr, 6);
-		sdata.rssi = esp_now_info->rx_ctrl->rssi;
+		f_cons(&v);
+		for (int i = 0; i < 6; i++) {
+			f_cons(&v);
+			f_i(&v, src[i]);
+		}
+		f_sym(&v, SYM_NIL);
 
-		if (rb_insert(&esp_now_rx_rb, &sdata)) {
-			xSemaphoreGive(esp_now_rx_sem);
+		f_cons(&v);
+		for (int i = 0; i < 6; i++) {
+			f_cons(&v);
+			f_i(&v, des[i]);
+		}
+		f_sym(&v, SYM_NIL);
+
+		f_cons(&v);
+		f_lbm_array(&v, len, (uint8_t *)data);
+
+		f_cons(&v);
+		f_i(&v, rssi);
+
+		f_sym(&v, SYM_NIL);
+
+		lbm_finish_flatten(&v);
+
+		if (esp_now_recv_cid >= 0) {
+			if (!lbm_unblock_ctx(esp_now_recv_cid, &v)) {
+				lbm_free(v.buf);
+			}
 		} else {
-			free(sdata.data);
+			if (!lbm_event(&v)) {
+				lbm_free(v.buf);
+			}
 		}
 	}
+}
+
+// Called from comm_espnow when a send completes; unblocks the esp-now-send ctx.
+static void lisp_espnow_sent(const uint8_t *des, bool success, void *user) {
+	(void)des;
+	(void)user;
+	lbm_unblock_ctx_unboxed(esp_now_send_cid,
+			success ? ENC_SYM_TRUE : ENC_SYM_NIL);
 }
 
 static lbm_value ext_esp_now_start(lbm_value *args, lbm_uint argn) {
 	(void)args; (void)argn;
 
-	main_wait_until_init_done();
-
-	if (backup.config.wifi_mode == WIFI_MODE_DISABLED && !esp_now_initialized) {
-		esp_netif_init();
-		esp_event_loop_create_default();
-		wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-		esp_wifi_init(&cfg);
-		esp_wifi_set_storage(WIFI_STORAGE_RAM);
-		esp_wifi_set_mode(WIFI_MODE_APSTA);
-
-		if (backup.config.ble_mode == BLE_MODE_DISABLED) {
-			esp_wifi_set_ps(WIFI_PS_NONE);
-		}
-
-		// The event handler allows some of the wifi-extensions
-		// to work.
-		esp_event_handler_instance_t instance_any_id;
-		esp_event_handler_instance_register(
-				WIFI_EVENT,
-				ESP_EVENT_ANY_ID,
-				&comm_wifi_event_handler,
-				NULL,
-				&instance_any_id);
-
-		// Enable FTM responder
-		wifi_config_t wifi_config;
-		memset(&wifi_config, 0, sizeof(wifi_config));
-		esp_wifi_get_config(WIFI_IF_AP, &wifi_config);
-		wifi_config.ap.ftm_responder = true;
-		esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
-
-		esp_wifi_start();
+	if (!comm_espnow_start()) {
+		return ENC_SYM_EERROR;
 	}
 
-	if (!esp_now_initialized) {
-		if (esp_now_init() != ESP_OK) {
-			return ENC_SYM_EERROR;
-		}
-
-		esp_now_rx_sem = xSemaphoreCreateBinary();
-		rb_init(&esp_now_rx_rb, esp_now_rx_data, sizeof(esp_now_send_data), ESP_NOW_RX_BUFFER_ELEMENTS);
-		xTaskCreate(esp_rx_fun, "esp_rx", 2048, NULL, 3, NULL);
+	// Register the lisp listener once, on first start.
+	if (!esp_now_listener_added) {
 		esp_now_recv_cid = -1;
-
-		esp_now_register_send_cb(espnow_send_cb);
-		esp_now_register_recv_cb(espnow_recv_cb);
-		esp_now_initialized = true;
+		comm_espnow_add_listener(lisp_espnow_recv, lisp_espnow_sent, NULL);
+		esp_now_listener_added = true;
 	}
 
 	return ENC_SYM_TRUE;
 }
 
 static lbm_value ext_esp_now_add_peer(lbm_value *args, lbm_uint argn) {
-	if (!esp_now_initialized) {
+	if (!comm_espnow_is_initialized()) {
 		lbm_set_error_reason(esp_init_msg);
 		return ENC_SYM_EERROR;
 	}
@@ -2493,12 +2422,12 @@ static lbm_value ext_esp_now_add_peer(lbm_value *args, lbm_uint argn) {
 
 	int rate = -1;
 	if (argn >= 2) {
-		if (!lbm_is_number(args[1]) || lbm_dec_as_i32(args[2]) > 15) {
+		if (!lbm_is_number(args[1]) || lbm_dec_as_i32(args[1]) > 15) {
 			lbm_set_error_reason(lbm_error_str_incorrect_arg);
 			return ENC_SYM_TERROR;
 		}
 
-		rate = lbm_dec_as_i32(args[2]);
+		rate = lbm_dec_as_i32(args[1]);
 	}
 
 	uint8_t addr[ESP_NOW_ETH_ALEN] = {255, 255, 255, 255, 255, 255};
@@ -2521,33 +2450,11 @@ static lbm_value ext_esp_now_add_peer(lbm_value *args, lbm_uint argn) {
 		curr = lbm_cdr(curr);
 	}
 
-	esp_now_peer_info_t peer;
-	memset(&peer, 0, sizeof(peer));
-	peer.channel = 0; // Must be the same as the wifi-channel when using wifi. 0 means current channel.
-	peer.ifidx = ESP_IF_WIFI_AP;
-	peer.encrypt = false;
-	memcpy(peer.peer_addr, addr, ESP_NOW_ETH_ALEN);
-
-	esp_err_t res = esp_now_add_peer(&peer);
-
-	if (rate >= 0) {
-		esp_now_rate_config_t rate_cfg;
-		rate_cfg.phymode = WIFI_PHY_MODE_HT20;
-		rate_cfg.dcm = false;
-		rate_cfg.ersu = false;
-		rate_cfg.rate = rate;
-		esp_now_set_peer_rate_config(addr, &rate_cfg);
-	}
-
-	if (res == ESP_OK || res == ESP_ERR_ESPNOW_EXIST) {
-		return ENC_SYM_TRUE;
-	} else {
-		return ENC_SYM_EERROR;
-	}
+	return comm_espnow_add_peer(addr, rate) ? ENC_SYM_TRUE : ENC_SYM_EERROR;
 }
 
 static lbm_value ext_esp_now_del_peer(lbm_value *args, lbm_uint argn) {
-	if (!esp_now_initialized) {
+	if (!comm_espnow_is_initialized()) {
 		lbm_set_error_reason(esp_init_msg);
 		return ENC_SYM_EERROR;
 	}
@@ -2576,13 +2483,7 @@ static lbm_value ext_esp_now_del_peer(lbm_value *args, lbm_uint argn) {
 		curr = lbm_cdr(curr);
 	}
 
-	esp_err_t res = esp_now_del_peer(addr);
-
-	if (res == ESP_OK || res == ESP_ERR_ESPNOW_NOT_FOUND) {
-		return ENC_SYM_TRUE;
-	} else {
-		return ENC_SYM_EERROR;
-	}
+	return comm_espnow_del_peer(addr) ? ENC_SYM_TRUE : ENC_SYM_EERROR;
 }
 
 static lbm_value ext_get_mac_addr(lbm_value *args, lbm_uint argn) {
@@ -2697,7 +2598,7 @@ static lbm_value ext_wifi_stop(lbm_value *args, lbm_uint argn) {
 }
 
 static lbm_value ext_esp_now_send(lbm_value *args, lbm_uint argn) {
-	if (!esp_now_initialized) {
+	if (!comm_espnow_is_initialized()) {
 		lbm_set_error_reason(esp_init_msg);
 		return ENC_SYM_EERROR;
 	}
@@ -2732,7 +2633,7 @@ static lbm_value ext_esp_now_send(lbm_value *args, lbm_uint argn) {
 		lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[1]);
 		esp_now_send_cid = lbm_get_current_cid();
 		lbm_block_ctx_from_extension();
-		esp_err_t send_res = esp_now_send(peer, (uint8_t*)str, (size_t)array->size);
+		esp_err_t send_res = comm_espnow_send(peer, (uint8_t*)str, (size_t)array->size);
 
 		if (send_res != ESP_OK) {
 			lbm_undo_block_ctx_from_extension();
@@ -2747,7 +2648,7 @@ static lbm_value ext_esp_now_send(lbm_value *args, lbm_uint argn) {
 }
 
 static lbm_value ext_esp_now_recv(lbm_value *args, lbm_uint argn) {
-	if (!esp_now_initialized) {
+	if (!comm_espnow_is_initialized()) {
 		lbm_set_error_reason(esp_init_msg);
 		return ENC_SYM_EERROR;
 	}
@@ -6978,6 +6879,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lispif_load_touch_extensions();
 		#if !CONFIG_IDF_TARGET_ESP32P4
 		lispif_load_wifi_extensions();
+		lispif_load_mqtt_extensions();
 		#endif
 
 		if (backup.config.ble_mode == BLE_MODE_SCRIPTING) {

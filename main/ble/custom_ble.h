@@ -174,6 +174,15 @@ custom_ble_result_t custom_ble_update_adv(
  */
 void custom_ble_set_attr_write_handler(attr_write_cb_t callback);
 
+// Additional write listener with a user pointer, fanned out alongside the
+// single handler set by custom_ble_set_attr_write_handler. Used by the native-
+// lib interface so it can receive writes without displacing the lisp handler.
+typedef void (*ble_write_listener_t)(
+	uint16_t attr_handle, uint16_t len, uint8_t *value, void *user
+);
+int custom_ble_add_write_listener(ble_write_listener_t cb, void *user);
+void custom_ble_remove_write_listener(int id);
+
 // TODO: If this fails, you're kinda screwed, since the internal attribute count
 // is Still incremented, with no way to decrement it from the outside. Yeah...
 // ._. Blocks until handles_cb has been called with the resulting handles.

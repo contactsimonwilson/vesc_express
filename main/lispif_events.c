@@ -22,6 +22,10 @@ volatile bool event_bms_reset_cnt_en = false;
 volatile bool event_bms_force_bal_en = false;
 volatile bool event_bms_zero_ofs_en = false;
 
+volatile bool event_mqtt_connected_en = false;
+volatile bool event_mqtt_disconnected_en = false;
+volatile bool event_mqtt_rx_en = false;
+
 lbm_uint sym_event_can_sid = 0;
 lbm_uint sym_event_can_eid = 0;
 lbm_uint sym_event_data_rx = 0;
@@ -38,6 +42,10 @@ lbm_uint sym_bms_bal_ovr = 0;
 lbm_uint sym_bms_reset_cnt = 0;
 lbm_uint sym_bms_force_bal = 0;
 lbm_uint sym_bms_zero_ofs = 0;
+
+lbm_uint sym_event_mqtt_connected = 0;
+lbm_uint sym_event_mqtt_disconnected = 0;
+lbm_uint sym_event_mqtt_rx = 0;
 
 void lispif_events_load_symbols() {
     lbm_add_symbol_const("event-can-sid", &sym_event_can_sid);
@@ -56,4 +64,8 @@ void lispif_events_load_symbols() {
 	lbm_add_symbol_const("event-bms-reset-cnt", &sym_bms_reset_cnt);
 	lbm_add_symbol_const("event-bms-force-bal", &sym_bms_force_bal);
 	lbm_add_symbol_const("event-bms-zero-ofs", &sym_bms_zero_ofs);
+
+	lbm_add_symbol_const("event-mqtt-connected", &sym_event_mqtt_connected);
+	lbm_add_symbol_const("event-mqtt-disconnected", &sym_event_mqtt_disconnected);
+	lbm_add_symbol_const("event-mqtt-rx", &sym_event_mqtt_rx);
 }

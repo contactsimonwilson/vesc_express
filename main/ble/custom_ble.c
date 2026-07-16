@@ -85,6 +85,17 @@ static uint16_t chr_descr_capacity;
 static char device_name[CUSTOM_BLE_MAX_NAME_LEN + 1];
 static attr_write_cb_t attr_write_cb = NULL;
 
+// Additional write listeners (with a user pointer), fanned out alongside the
+// legacy single attr_write_cb. Lets the native-lib interface receive writes
+// without stealing the handler the lisp extensions install.
+#define CUSTOM_BLE_MAX_WRITE_LISTENERS 4
+typedef struct {
+	ble_write_listener_t cb;
+	void *user;
+	bool used;
+} write_listener_inst_t;
+static write_listener_inst_t write_listeners[CUSTOM_BLE_MAX_WRITE_LISTENERS];
+
 static size_t custom_service_len           = 0;
 static service_instance_t *custom_services = NULL;
 static size_t custom_attr_len              = 0;
@@ -406,16 +417,24 @@ static void gatts_event_handler(
 				STORED_LOGF("I need to handle prepared writes...");
 			}
 
-			if (attr_write_cb != NULL) {
-				// TODO: How do we handle long segmented values?
-				// When are they even segmented?
-				if (param->write.offset != 0) {
-					STORED_LOGF("I need to handle segmented values...");
-				} else {
+			// TODO: How do we handle long segmented values?
+			// When are they even segmented?
+			if (param->write.offset != 0) {
+				STORED_LOGF("I need to handle segmented values...");
+			} else {
+				if (attr_write_cb != NULL) {
 					attr_write_cb(
 						param->write.handle, param->write.len,
 						param->write.value
 					);
+				}
+				for (int i = 0; i < CUSTOM_BLE_MAX_WRITE_LISTENERS; i++) {
+					if (write_listeners[i].used && write_listeners[i].cb) {
+						write_listeners[i].cb(
+							param->write.handle, param->write.len,
+							param->write.value, write_listeners[i].user
+						);
+					}
 				}
 			}
 
@@ -662,6 +681,26 @@ custom_ble_result_t custom_ble_update_adv(
 
 void custom_ble_set_attr_write_handler(attr_write_cb_t callback) {
 	attr_write_cb = callback;
+}
+
+int custom_ble_add_write_listener(ble_write_listener_t cb, void *user) {
+	for (int i = 0; i < CUSTOM_BLE_MAX_WRITE_LISTENERS; i++) {
+		if (!write_listeners[i].used) {
+			write_listeners[i].cb   = cb;
+			write_listeners[i].user = user;
+			write_listeners[i].used = true;
+			return i;
+		}
+	}
+	return -1;
+}
+
+void custom_ble_remove_write_listener(int id) {
+	if (id >= 0 && id < CUSTOM_BLE_MAX_WRITE_LISTENERS) {
+		write_listeners[id].used = false;
+		write_listeners[id].cb   = NULL;
+		write_listeners[id].user = NULL;
+	}
 }
 
 custom_ble_result_t custom_ble_add_service(

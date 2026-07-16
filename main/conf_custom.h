@@ -15,31 +15,25 @@
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
-    */
+ */
 
-#ifndef MAIN_COMM_BLE_H_
-#define MAIN_COMM_BLE_H_
+#ifndef CONF_CUSTOM_H_
+#define CONF_CUSTOM_H_
 
 #include <stdint.h>
 #include <stdbool.h>
 
-#if !CONFIG_IDF_TARGET_ESP32P4
+// Functions
+void conf_custom_add_config(
+	int (*get_cfg)(uint8_t *data, bool is_default),
+	bool (*set_cfg)(uint8_t *data), int (*get_cfg_xml)(uint8_t **data)
+);
+void conf_custom_clear_configs(void);
+int conf_custom_cfg_num(void);
+int conf_custom_get_cfg_xml(int conf_ind, uint8_t **data);
+void conf_custom_process_cmd(
+	unsigned char *data, unsigned int len,
+	void (*reply_func)(unsigned char *data, unsigned int len)
+);
 
-void comm_ble_init(void);
-bool comm_ble_is_connected();
-int comm_ble_mtu_now(void);
-void comm_ble_send_packet(unsigned char *data, unsigned int len);
-void comm_ble_set_conn_callback(void (*cb)(bool connected));
-
-#else
-
-void comm_ble_init(void);
-bool comm_ble_is_connected(void);
-int comm_ble_mtu_now(void);
-void comm_ble_send_packet(unsigned char *data, unsigned int len);
-void comm_ble_set_conn_callback(void (*cb)(bool connected));
-
-
-#endif
-
-#endif /* MAIN_COMM_BLE_H_ */
+#endif /* CONF_CUSTOM_H_ */
