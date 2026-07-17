@@ -55,9 +55,12 @@ int conf_custom_cfg_num(void) {
 
 	if (m_get_cfg_xml) {
 		uint8_t *xml_data = 0;
-		m_get_cfg_xml(&xml_data);
+		int xml_len = m_get_cfg_xml(&xml_data);
 
-		if (utils_is_func_valid(xml_data)) {
+		// xml_data points at the lib's XML in its (non-executable) data
+		// block, so validate it as a readable pointer with a real length -
+		// NOT with esp_ptr_executable, which only passes for code.
+		if (xml_data != NULL && xml_len > 0) {
 			res = 1;
 		}
 	}
