@@ -44,17 +44,21 @@ uint32_t flash_helper_code_size(int ind);
 uint16_t flash_helper_code_flags(int ind);
 flast_stats flash_helper_stats(void);
 
-// Persistent key/value store (NVS "lbm" namespace, addresses 0..255), shared
-// with the lisp eeprom-store/-read extensions.
+// Persistent key/value store, backing both the native lib interface and the
+// lisp eeprom-store/-read extensions. This is the only place that knows the
+// NVS namespace and key naming, so the two users cannot drift apart.
+#define EEPROM_VARS		512
+
 typedef union {
 	uint32_t as_u32;
 	int32_t as_i32;
 	float as_float;
 } eeprom_var;
 
-bool store_eeprom_var(eeprom_var *v, int address);
-bool read_eeprom_var(eeprom_var *v, int address);
-bool store_eeprom_var_batch(eeprom_var *v, int base_addr, int count);
-bool read_eeprom_var_batch(eeprom_var *v, int base_addr, int count);
+// Each call is one NVS transaction covering count variables from base_addr,
+// which must be within 0..EEPROM_VARS-1. Pass count 1 for a single variable.
+bool store_eeprom_var(eeprom_var *v, int base_addr, int count);
+bool read_eeprom_var(eeprom_var *v, int base_addr, int count);
+bool erase_eeprom_var(int base_addr, int count);
 
 #endif /* FLASH_HELPER_H_ */

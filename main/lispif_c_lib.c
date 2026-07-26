@@ -674,8 +674,6 @@ lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn) {
 		// Persistent storage
 		cif.cif.store_eeprom_var = store_eeprom_var;
 		cif.cif.read_eeprom_var  = read_eeprom_var;
-		cif.cif.store_eeprom_var_batch = store_eeprom_var_batch;
-		cif.cif.read_eeprom_var_batch  = read_eeprom_var_batch;
 
 		// Custom config (VESC Tool settings page)
 		cif.cif.conf_custom_add_config    = conf_custom_add_config_wrapper;
